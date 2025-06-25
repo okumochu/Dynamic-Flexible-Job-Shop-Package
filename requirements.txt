@@ -1,2 +1,2 @@
 numpy>=1.21.0
-typing-extensions>=4.0.0 
+gurobipy>=10.0.0 

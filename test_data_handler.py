@@ -6,9 +6,13 @@ Demonstrates usage with the mk01 dataset
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from data_handler import FlexibleJobShopDataHandler, load_multiple_datasets, compare_datasets
+from benchmark.data_handler import FlexibleJobShopDataHandler, load_multiple_datasets, compare_datasets
+from two_stage_GA.env import get_ga_data
+from MILP.env import get_milp_data
+from hierarchical_rl.env import get_state_representation
+from utils.io_utils import save_to_json, load_from_json
 
 
 def test_basic_functionality():
@@ -16,7 +20,7 @@ def test_basic_functionality():
     print("=== Testing Basic Functionality ===")
     
     # Load the mk01 dataset
-    dataset_path = "dataset/brandimarte/mk01.txt"
+    dataset_path = "benchmark/datasets/brandimarte/mk01.txt"
     handler = FlexibleJobShopDataHandler(dataset_path)
     
     print(f"Dataset loaded: {handler}")
@@ -45,7 +49,7 @@ def test_job_and_operation_access():
     """Test accessing jobs and operations."""
     print("\n=== Testing Job and Operation Access ===")
     
-    handler = FlexibleJobShopDataHandler("dataset/brandimarte/mk01.txt")
+    handler = FlexibleJobShopDataHandler("benchmark/datasets/brandimarte/mk01.txt")
     
     # Test job access
     print(f"Number of jobs: {handler.num_jobs}")
@@ -65,29 +69,27 @@ def test_algorithm_interfaces():
     """Test interfaces for different algorithms."""
     print("\n=== Testing Algorithm Interfaces ===")
     
-    handler = FlexibleJobShopDataHandler("dataset/brandimarte/mk01.txt")
+    handler = FlexibleJobShopDataHandler("benchmark/datasets/brandimarte/mk01.txt")
     
     # Test RL interface
     print("RL State Representations:")
-    matrix_state = handler.get_state_representation("matrix")
+    matrix_state = get_state_representation(handler, "matrix")
     print(f"  Matrix shape: {matrix_state.shape}")
     print(f"  Matrix sample: {matrix_state[:3, :3]}")
-    
-    vector_state = handler.get_state_representation("vector")
+    vector_state = get_state_representation(handler, "vector")
     print(f"  Vector length: {len(vector_state)}")
-    
-    dict_state = handler.get_state_representation("dict")
+    dict_state = get_state_representation(handler, "dict")
     print(f"  Dict keys: {list(dict_state.keys())}")
     
     # Test MILP interface
     print("\nMILP Data:")
-    milp_data = handler.get_milp_data()
+    milp_data = get_milp_data(handler)
     print(f"  Keys: {list(milp_data.keys())}")
     print(f"  Processing times shape: {len(milp_data['processing_times'])} x {len(milp_data['processing_times'][0])}")
     
     # Test GA interface
     print("\nGA Data:")
-    ga_data = handler.get_ga_data()
+    ga_data = get_ga_data(handler)
     print(f"  Keys: {list(ga_data.keys())}")
     print(f"  Job sequences: {ga_data['job_sequences'][:2]}")  # Show first 2 jobs
 
@@ -97,7 +99,7 @@ def test_multiple_datasets():
     print("\n=== Testing Multiple Datasets ===")
     
     # Load all Brandimarte datasets
-    brandimarte_dir = "dataset/brandimarte"
+    brandimarte_dir = "benchmark/datasets/brandimarte"
     if os.path.exists(brandimarte_dir):
         datasets = load_multiple_datasets(brandimarte_dir, "mk*.txt")
         print(f"Loaded {len(datasets)} Brandimarte datasets")
@@ -111,7 +113,7 @@ def test_multiple_datasets():
                   f"{stats['num_operations']} operations, LB={stats['problem_lower_bound']}")
     
     # Load some Hurink datasets
-    hurink_dir = "dataset/hurink/edata"
+    hurink_dir = "benchmark/datasets/hurink/edata"
     if os.path.exists(hurink_dir):
         datasets = load_multiple_datasets(hurink_dir, "*.txt")
         print(f"\nLoaded {len(datasets)} Hurink datasets")
@@ -126,16 +128,15 @@ def test_json_serialization():
     """Test JSON serialization and deserialization."""
     print("\n=== Testing JSON Serialization ===")
     
-    handler = FlexibleJobShopDataHandler("dataset/brandimarte/mk01.txt")
+    handler = FlexibleJobShopDataHandler("benchmark/datasets/brandimarte/mk01.txt")
     
     # Save to JSON
     json_path = "test_mk01.json"
-    handler.save_to_json(json_path)
+    save_to_json(handler, json_path)
     print(f"Saved to {json_path}")
     
     # Load from JSON
-    new_handler = FlexibleJobShopDataHandler()
-    new_handler.load_from_json(json_path)
+    new_handler = load_from_json(json_path)
     print(f"Loaded from {json_path}")
     
     # Compare

@@ -1,27 +1,49 @@
 import os
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
-from dataclasses import dataclass
 import json
 
 
-@dataclass
 class Operation:
     """Represents a single operation in a job."""
-    operation_id: int
-    job_id: int
-    machine_id: int
-    processing_time: int
+    
+    def __init__(self, operation_id: int, job_id: int, machine_processing_times: Dict[int, int]):
+        self.operation_id = operation_id
+        self.job_id = job_id
+        self.machine_processing_times = machine_processing_times  # machine_id -> processing_time
+    
+    @property
+    def compatible_machines(self) -> List[int]:
+        """Get list of compatible machine IDs."""
+        return list(self.machine_processing_times.keys())
+    
+    @property
+    def min_processing_time(self) -> int:
+        """Get minimum processing time across all compatible machines."""
+        return min(self.machine_processing_times.values())
+    
+    @property
+    def max_processing_time(self) -> int:
+        """Get maximum processing time across all compatible machines."""
+        return max(self.machine_processing_times.values())
+    
+    def get_processing_time(self, machine_id: int) -> int:
+        """Get processing time for a specific machine."""
+        if machine_id not in self.machine_processing_times:
+            raise ValueError(f"Machine {machine_id} is not compatible with operation {self.operation_id}")
+        return self.machine_processing_times[machine_id]
     
     def __str__(self):
-        return f"Job{self.job_id}-Op{self.operation_id} on Machine{self.machine_id} (time={self.processing_time})"
+        machines_str = ", ".join([f"M{m}->{t}" for m, t in self.machine_processing_times.items()])
+        return f"Job{self.job_id}-Op{self.operation_id} on {machines_str}"
 
 
-@dataclass
 class Job:
     """Represents a job with multiple operations."""
-    job_id: int
-    operations: List[Operation]
+    
+    def __init__(self, job_id: int, operations: List[Operation]):
+        self.job_id = job_id
+        self.operations = operations
     
     def __str__(self):
         return f"Job{self.job_id} with {len(self.operations)} operations"
@@ -29,16 +51,14 @@ class Job:
     @property
     def total_processing_time(self) -> int:
         """Calculate total processing time for all operations in this job."""
-        return sum(op.processing_time for op in self.operations)
+        return sum(op.min_processing_time for op in self.operations)
 
 
 class FlexibleJobShopDataHandler:
     """
     A comprehensive data handler for Flexible Job Shop Scheduling Problems (FJSP).
     
-    Supports multiple dataset formats:
-    - Brandimarte format (mk01-mk15)
-    - Hurink format (abz, car, la, mt, orb series)
+    Supports on main dataset formats e.g. Brandimarte format (mk01-mk15) and Hurink format.
     
     Provides unified interface for:
     - RL algorithms
@@ -106,21 +126,29 @@ class FlexibleJobShopDataHandler:
             data_idx = 1
             
             for op_idx in range(num_operations):
-                # Parse machine-processing_time pairs
-                machine_id = data[data_idx]
-                processing_time = data[data_idx + 1]
+                # Parse number of compatible machines for this operation
+                num_compatible_machines = data[data_idx]
+                data_idx += 1
                 
+                # Parse machine-processing_time pairs for this operation
+                operation_machines = []
+                for machine_idx in range(num_compatible_machines):
+                    machine_id = data[data_idx] + 1  # Convert 0-based to 1-based
+                    processing_time = data[data_idx + 1]
+                    operation_machines.append((machine_id, processing_time))
+                    data_idx += 2
+                
+                # Create operation with all compatible machines
+                machine_processing_times = {machine_id: processing_time for machine_id, processing_time in operation_machines}
                 operation = Operation(
                     operation_id=operation_id,
                     job_id=job_id,
-                    machine_id=machine_id,
-                    processing_time=processing_time
+                    machine_processing_times=machine_processing_times
                 )
                 
                 job_operations.append(operation)
                 self.operations.append(operation)
                 operation_id += 1
-                data_idx += 2
             
             job = Job(job_id=job_id, operations=job_operations)
             self.jobs.append(job)
@@ -133,7 +161,9 @@ class FlexibleJobShopDataHandler:
         # Machine operations mapping
         self.machine_operations = {i: [] for i in range(1, self.num_machines + 1)}
         for operation in self.operations:
-            self.machine_operations[operation.machine_id].append(operation)
+            # Add operation to all compatible machines
+            for machine_id in operation.compatible_machines:
+                self.machine_operations[machine_id].append(operation)
         
         # Job-operation matrix (jobs x max_operations)
         max_ops_per_job = max(len(job.operations) for job in self.jobs)
@@ -147,9 +177,9 @@ class FlexibleJobShopDataHandler:
         self.processing_time_matrix = np.zeros((self.num_operations, self.num_machines), dtype=int)
         
         for operation in self.operations:
-            # In FJSP, operations can potentially be processed on multiple machines
-            # For now, we assume each operation has a fixed machine assignment
-            self.processing_time_matrix[operation.operation_id, operation.machine_id - 1] = operation.processing_time
+            # Set processing times for all compatible machines
+            for machine_id in operation.compatible_machines:
+                self.processing_time_matrix[operation.operation_id, machine_id - 1] = operation.get_processing_time(machine_id)
         
         # Machine availability matrix (machines x time_slots)
         # Initialize with all machines available at time 0
@@ -195,14 +225,18 @@ class FlexibleJobShopDataHandler:
     
     def get_total_processing_time(self) -> int:
         """Get total processing time for all operations."""
-        return sum(op.processing_time for op in self.operations)
+        return sum(op.min_processing_time for op in self.operations)
     
     def get_machine_load(self, machine_id: int) -> int:
         """Get total processing time assigned to a specific machine."""
         if machine_id < 1 or machine_id > self.num_machines:
             raise ValueError(f"Invalid machine_id: {machine_id}")
         
-        return sum(op.processing_time for op in self.machine_operations[machine_id])
+        total_load = 0
+        for operation in self.machine_operations[machine_id]:
+            if machine_id in operation.machine_processing_times:
+                total_load += operation.get_processing_time(machine_id)
+        return total_load
     
     def get_job_makespan_lower_bound(self, job_id: int) -> int:
         """Get theoretical lower bound for job makespan (sum of processing times)."""
@@ -215,152 +249,6 @@ class FlexibleJobShopDataHandler:
         max_machine_load = max(self.get_machine_load(mid) for mid in range(1, self.num_machines + 1))
         return max(max_job_time, max_machine_load)
     
-    def get_state_representation(self, format_type: str = "matrix") -> Union[np.ndarray, Dict]:
-        """
-        Get state representation for RL algorithms.
-        
-        Args:
-            format_type: Type of representation ("matrix", "vector", "dict")
-        
-        Returns:
-            State representation in the specified format
-        """
-        if format_type == "matrix":
-            # Return processing time matrix
-            return self.processing_time_matrix.copy()
-        
-        elif format_type == "vector":
-            # Flatten the processing time matrix
-            return self.processing_time_matrix.flatten()
-        
-        elif format_type == "dict":
-            # Dictionary representation
-            return {
-                "num_jobs": self.num_jobs,
-                "num_machines": self.num_machines,
-                "num_operations": self.num_operations,
-                "jobs": [
-                    {
-                        "job_id": job.job_id,
-                        "operations": [
-                            {
-                                "operation_id": op.operation_id,
-                                "machine_id": op.machine_id,
-                                "processing_time": op.processing_time
-                            }
-                            for op in job.operations
-                        ]
-                    }
-                    for job in self.jobs
-                ]
-            }
-        
-        else:
-            raise ValueError(f"Unknown format_type: {format_type}")
-    
-    def get_milp_data(self) -> Dict:
-        """
-        Get data formatted for MILP solvers.
-        
-        Returns:
-            Dictionary with MILP-compatible data structures
-        """
-        return {
-            "num_jobs": self.num_jobs,
-            "num_machines": self.num_machines,
-            "num_operations": self.num_operations,
-            "processing_times": self.processing_time_matrix.tolist(),
-            "job_operations": [
-                [op.operation_id for op in job.operations]
-                for job in self.jobs
-            ],
-            "operation_machines": [
-                [op.machine_id for op in job.operations]
-                for job in self.jobs
-            ]
-        }
-    
-    def get_ga_data(self) -> Dict:
-        """
-        Get data formatted for Genetic Algorithms.
-        
-        Returns:
-            Dictionary with GA-compatible data structures
-        """
-        return {
-            "num_jobs": self.num_jobs,
-            "num_machines": self.num_machines,
-            "num_operations": self.num_operations,
-            "job_sequences": [
-                [op.operation_id for op in job.operations]
-                for job in self.jobs
-            ],
-            "processing_times": self.processing_time_matrix.tolist(),
-            "machine_assignments": [
-                [op.machine_id for op in job.operations]
-                for job in self.jobs
-            ]
-        }
-    
-    def validate_solution(self, schedule: List[Tuple[int, int, int, int]]) -> Dict:
-        """
-        Validate a solution (operation_id, machine_id, start_time, end_time).
-        
-        Args:
-            schedule: List of tuples (operation_id, machine_id, start_time, end_time)
-        
-        Returns:
-            Dictionary with validation results
-        """
-        # TODO: Implement solution validation
-        # This would check for:
-        # - No overlapping operations on same machine
-        # - Job precedence constraints
-        # - All operations scheduled
-        # - Valid machine assignments
-        
-        return {
-            "is_valid": True,  # Placeholder
-            "makespan": 0,     # Placeholder
-            "violations": []    # Placeholder
-        }
-    
-    def save_to_json(self, filepath: str) -> None:
-        """Save the problem instance to JSON format."""
-        data = self.get_state_representation("dict")
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
-    
-    def load_from_json(self, filepath: str) -> None:
-        """Load a problem instance from JSON format."""
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        
-        self.num_jobs = data["num_jobs"]
-        self.num_machines = data["num_machines"]
-        self.num_operations = data["num_operations"]
-        
-        # Reconstruct jobs and operations
-        self.jobs = []
-        self.operations = []
-        
-        for job_data in data["jobs"]:
-            job_operations = []
-            for op_data in job_data["operations"]:
-                operation = Operation(
-                    operation_id=op_data["operation_id"],
-                    job_id=op_data.get("job_id", job_data["job_id"]),
-                    machine_id=op_data["machine_id"],
-                    processing_time=op_data["processing_time"]
-                )
-                job_operations.append(operation)
-                self.operations.append(operation)
-            
-            job = Job(job_id=job_data["job_id"], operations=job_operations)
-            self.jobs.append(job)
-        
-        self._build_derived_structures()
-    
     def get_statistics(self) -> Dict:
         """Get comprehensive statistics about the problem instance."""
         return {
@@ -369,7 +257,7 @@ class FlexibleJobShopDataHandler:
             "num_operations": self.num_operations,
             "total_processing_time": self.get_total_processing_time(),
             "avg_operations_per_job": self.num_operations / self.num_jobs,
-            "avg_processing_time": self.get_total_processing_time() / self.num_operations,
+            "avg_processing_time": sum(op.min_processing_time for op in self.operations) / self.num_operations,
             "machine_loads": {
                 f"machine_{i}": self.get_machine_load(i)
                 for i in range(1, self.num_machines + 1)

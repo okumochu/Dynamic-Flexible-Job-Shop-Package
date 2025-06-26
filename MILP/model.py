@@ -7,16 +7,20 @@ from benchmark.data_handler import FlexibleJobShopDataHandler
 
 class MILP:
     """
-    MILP model for Flexible Job Shop Problem using Gurobi.
+    Continuous-time disjunctive MILP model for Flexible Job Shop Problem using Gurobi.
     
     Decision Variables:
-    - x[i,k,t]: Binary variable = 1 if operation i starts on machine k at time t
+    - s[i]: Continuous start time of operation i
+    - x[i,k]: Binary variable = 1 if operation i is assigned to machine k
+    - z[i,j,k]: Binary variable = 1 if operation i precedes operation j on machine k (for unordered pairs sharing a compatible machine)
+    - C_max: Makespan (continuous)
     
     Constraints:
-    1. Each operation must be assigned to exactly one machine at one time
-    2. Machine capacity: No overlapping operations on the same machine
-    3. Job precedence: Operations within a job must follow sequence
-    4. Makespan definition: C_max >= completion time of all operations
+    1. Routing: Each operation assigned to exactly one machine (sum_k x[i,k] = 1)
+    2. Disjunctive capacity: For each unordered pair (i,j) and machine k both can use, s[i] + p[i,k] <= s[j] + M*(1-z[i,j,k]), s[j] + p[j,k] <= s[i] + M*z[i,j,k], and z[i,j,k] + z[j,i,k] = x[i,k] + x[j,k] - 1
+    3. Job precedence: s[current] >= s[prev] + sum_k p[prev,k]*x[prev,k]
+    4. Makespan: C_max >= s[i] + sum_k p[i,k]*x[i,k]
+    Objective: Minimize C_max
     """
     
     def __init__(self, data_handler: FlexibleJobShopDataHandler):
@@ -33,16 +37,18 @@ class MILP:
         self.num_machines = data_handler.num_machines
         self.num_operations = data_handler.num_operations
         self.processing_times = data_handler.processing_time_matrix
-        self.time_horizon = int(np.sum(self.processing_times))
-
-        # Get data from data handler
         self.job_operations = data_handler.get_job_operations_list()
         self.operation_machines = data_handler.get_operation_machines_list()
         
         # Gurobi model
         self.model = None
-        self.x = {}  # Decision variables x[i,k,t]
-        self.C_max = None  # Makespan variable
+        self.s = None  # Start times
+        self.x = None  # Routing
+        self.z = None  # Disjunctive sequencing
+        self.C_max = None
+        self.pair_indices = []  # (i, j, k) for unordered pairs sharing a machine
+        self.heuristic_makespan = int(np.sum(self.processing_times))
+        self.min_processing_time = int(np.min(self.processing_times[np.nonzero(self.processing_times)]))
         
     def get_operation_info(self, operation_id: int):
         """
@@ -54,7 +60,7 @@ class MILP:
         """
         return self.data_handler.get_operation_info(operation_id)
 
-    def build_model(self, time_limit: int = None, MIPFocus: int = 1):
+    def build_model(self, time_limit: int = None, MIPFocus: int = 1, verbose: int = 0):
         """Build the MILP model with all variables and constraints.
         
         Args:
@@ -65,10 +71,10 @@ class MILP:
         self.model = gp.Model("FlexibleJobShop")
         
         # Set model parameters for better performance
-        if time_limit is not None:
-            self.model.setParam('TimeLimit', time_limit)
+        if time_limit is not None: self.model.setParam('TimeLimit', time_limit)
+        self.model.setParam('LogToConsole', verbose)
         self.model.setParam('MIPFocus', MIPFocus)
-        
+
         # Create decision variables
         self._create_variables()
         
@@ -78,117 +84,82 @@ class MILP:
         # Set objective function
         self._set_objective()
         
-        print(f"Model built with {self.model.NumVars} variables and {self.model.NumConstrs} constraints")
+        self.model.update()
     
     def _create_variables(self):
         """Create decision variables and objective variable"""
         
-        # Decision variables x[i,k,t]: operation i starts on machine k at time t
-        for i in range(self.num_operations):
-            for k in range(self.num_machines):
-                # Only create variables for compatible machines
-                job_id, op_index = self.get_operation_info(i)
-                if k in self.operation_machines[job_id][op_index]:
-                    for t in range(self.time_horizon):
-                        self.x[i, k, t] = self.model.addVar(
-                            vtype=GRB.BINARY,
-                            name=f"x_{i}_{k}_{t}"
-                        )
+        # Start times for each operation
+        self.s = self.model.addVars(self.num_operations, vtype=GRB.CONTINUOUS, name="s")
         
-        # Objective variable
-        self.C_max = self.model.addVar(
-            vtype=GRB.CONTINUOUS,
-            name="C_max"
-        )
+        # Routing: x[i,k] = 1 if operation i assigned to machine k
+        self.x = self.model.addVars(self.num_operations, self.num_machines, vtype=GRB.BINARY, name="x")
         
-        self.model.update()
+        # Build pair_indices: unordered pairs (i, j, k) where i < j and both can use machine k
+        self.pair_indices = []
+        for k in range(self.num_machines):
+            # Use data_handler's get_machine_operations to get all operations compatible with machine k
+            ops_on_k = [op.operation_id for op in self.data_handler.get_machine_operations(k)]
+            for idx1 in range(len(ops_on_k)):
+                for idx2 in range(idx1 + 1, len(ops_on_k)):
+                    i, j = ops_on_k[idx1], ops_on_k[idx2]
+                    self.pair_indices.append((i, j, k))
+                    
+        # Disjunctive sequencing: z[i,j,k] = 1 if i precedes j on k
+        self.z = self.model.addVars(self.pair_indices, vtype=GRB.BINARY, name="z")
+        
+        # Makespan
+        self.C_max = self.model.addVar(vtype=GRB.CONTINUOUS, name="C_max")
     
     def _create_constraints(self):
-        print("Creating assignment constraints...")
-        # Each operation must be assigned to exactly one machine at one time.
+        
+        # Routing: Each operation assigned to exactly one machine
         for i in range(self.num_operations):
-            # Get compatible machines for operation i
             job_id, op_index = self.get_operation_info(i)
             compatible_machines = self.operation_machines[job_id][op_index]
-            
-            # Sum over all compatible machines and all start times = 1
-            lhs = gp.quicksum(
-                self.x[i, k, t]
-                for k in compatible_machines
-                for t in range(self.time_horizon)
-                if (i, k, t) in self.x
+            self.model.addConstr(gp.quicksum(self.x[i, k] for k in compatible_machines) == 1, name=f"routing_{i}")
+    
+        M = self.heuristic_makespan - self.min_processing_time
+        for (i, j, k) in self.pair_indices:
+            # Only for pairs where both can use machine k
+            p_i_k = self.processing_times[i][k]
+            p_j_k = self.processing_times[j][k]
+            # s[i] + p[i,k] <= s[j] + M*(1-z[i,j,k])
+            self.model.addConstr(
+                self.s[i] + p_i_k <= self.s[j] + M * (1 - self.z[i, j, k]),
+                name=f"disj1_{i}_{j}_{k}"
             )
-            self.model.addConstr(lhs == 1, name=f"assignment_{i}")
+            # s[j] + p[j,k] <= s[i] + M*z[i,j,k]
+            self.model.addConstr(
+                self.s[j] + p_j_k <= self.s[i] + M * self.z[i, j, k],
+                name=f"disj2_{i}_{j}_{k}"
+            )
+            # z[i,j,k] + z[j,i,k] = x[i,k] + x[j,k] - 1
+            if (j, i, k) in self.pair_indices:
+                self.model.addConstr(
+                    self.z[i, j, k] + self.z[j, i, k] == self.x[i, k] + self.x[j, k] - 1,
+                    name=f"activate_{i}_{j}_{k}"
+                )
     
-        print("Creating capacity constraints...")
-        # No overlapping operations on the same machine.
-        for k in range(self.num_machines):
-            for t in range(self.time_horizon):
-                # For each machine k and time t, ensure no overlap
-                overlapping_operations = []
-                
-                for i in range(self.num_operations):
-                    # Check if operation i can be processed on machine k
-                    job_id, op_index = self.get_operation_info(i)
-                    compatible_machines = self.operation_machines[job_id][op_index]
-                    
-                    if k in compatible_machines:
-                        # Check all possible start times that could overlap with time t
-                        for start_time in range(max(0, t - self.processing_times[i][k] + 1), t + 1):
-                            if (i, k, start_time) in self.x:
-                                overlapping_operations.append(self.x[i, k, start_time])
-                
-                if overlapping_operations:
-                    self.model.addConstr(
-                        gp.quicksum(overlapping_operations) <= 1,
-                        name=f"capacity_{k}_{t}"
-                    )
-    
-        print("Creating precedence constraints...")
-        # Operations within a job must follow sequence.
-        M = self.time_horizon + 1  # Big-M value, larger than any possible start time
-        constraint_count = 0
         for job_id in range(self.num_jobs):
             for op_index in range(1, len(self.job_operations[job_id])):
                 current_op = self.job_operations[job_id][op_index]
                 prev_op = self.job_operations[job_id][op_index - 1]
-                
-                # Only add constraints for compatible machines
-                current_compatible = self.operation_machines[job_id][op_index]
-                prev_compatible = self.operation_machines[job_id][op_index - 1]
-                
-                for k1 in current_compatible:
-                    for k2 in prev_compatible:
-                        # Only add constraint if both variables exist
-                        if (current_op, k1, 0) in self.x and (prev_op, k2, 0) in self.x:
-                            # Simplified precedence constraint: if both operations are scheduled, current must start after prev ends
-                            self.model.addConstr(
-                                gp.quicksum(t * self.x[current_op, k1, t] for t in range(self.time_horizon) if (current_op, k1, t) in self.x) >= 
-                                gp.quicksum((t + self.processing_times[prev_op][k2]) * self.x[prev_op, k2, t] for t in range(self.time_horizon) if (prev_op, k2, t) in self.x),
-                                name=f"precedence_{current_op}_{prev_op}_{k1}_{k2}"
-                            )
-                            constraint_count += 1
-                            if constraint_count % 1000 == 0:
-                                print(f"  Created {constraint_count} precedence constraints...")
+                # s[current] >= s[prev] + sum_k p[prev,k]*x[prev,k]
+                self.model.addConstr(
+                    self.s[current_op] >= self.s[prev_op] + gp.quicksum(self.processing_times[prev_op][k] * self.x[prev_op, k]
+                                                                        for k in self.operation_machines[job_id][op_index - 1]),
+                    name=f"precedence_{current_op}_{prev_op}"
+                )
     
-        print(f"Creating makespan constraints...")
-        # C_max >= completion time of all operations.
         for i in range(self.num_operations):
             job_id, op_index = self.get_operation_info(i)
             compatible_machines = self.operation_machines[job_id][op_index]
-            
-            for k in compatible_machines:
-                for t in range(self.time_horizon):
-                    if (i, k, t) in self.x:
-                        # C_max >= t + processing_time[i][k]
-                        self.model.addConstr(
-                            self.C_max >= t + self.processing_times[i][k] - (1 - self.x[i, k, t]) * self.time_horizon,
-                            name=f"makespan_{i}_{k}_{t}"
-                        )
+            self.model.addConstr(
+                self.C_max >= self.s[i] + gp.quicksum(self.processing_times[i][k] * self.x[i, k] for k in compatible_machines),
+                name=f"makespan_{i}"
+            )
         
-        self.model.update()
-        print(f"Constraints created successfully. Total constraints: {self.model.NumConstrs}")
-    
     def _set_objective(self):
         """Set objective function: minimize makespan."""
         self.model.setObjective(self.C_max, GRB.MINIMIZE)
@@ -205,7 +176,7 @@ class MILP:
                     "objective": float,
                     "solve_time": float
                 },
-                "schedule_result": Dict[int, List[Tuple[int, int]]]
+                "schedule_result": Dict[int, List[Tuple[int, float]]]
             }
         """
         if self.model is None:
@@ -217,7 +188,7 @@ class MILP:
         # Performance metrics
         performance = {
             "status": self._get_status_string(self.model.status),
-            "objective": self.C_max.X,
+            "objective": self.C_max.X if self.C_max.X is not None else None,
             "solve_time": self.model.Runtime,
         }
         
@@ -228,12 +199,15 @@ class MILP:
         if self.model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SOLUTION_LIMIT] and self.C_max.X is not None:
             # Extract machine schedule
             for i in range(self.num_operations):
+                assigned_machine = None
                 for k in range(self.num_machines):
-                    for t in range(self.time_horizon):
-                        if (i, k, t) in self.x and self.x[i, k, t].X > 0.5:
-                            if k not in schedule_result:
-                                schedule_result[k] = []
-                            schedule_result[k].append((i, t))
+                    if (i, k) in self.x and self.x[i, k].X > 0.5:
+                        assigned_machine = k
+                        break
+                if assigned_machine is not None:
+                    if assigned_machine not in schedule_result:
+                        schedule_result[assigned_machine] = []
+                    schedule_result[assigned_machine].append((i, self.s[i].X))
             
             # Sort operations by start time for each machine
             for machine_id in schedule_result:

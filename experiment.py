@@ -48,15 +48,8 @@ def run_experiment(dataset_path: str, time_limit: int = 120):
         
         # Print results
         print("\n   Results:")
-        perf = solution["performance"]
-        sched = solution["schedule_result"]
-        num_scheduled = sum(len(ops) for ops in sched.values())
-        
-        print(f"   Status: {perf['status']}")
-        print(f"   Objective (Makespan): {perf['objective']:.2f if perf['objective'] is not None else 'N/A'}")
-        print(f"   Solve Time: {perf['solve_time']:.2f} seconds")
-        print(f"   Scheduled Operations: {num_scheduled}/{data_handler.num_operations}")
-        
+        print(solution["performance"])
+
     except Exception as e:
         print(f"   ❌ Error solving MILP: {e}")
         return
@@ -85,7 +78,7 @@ def run_experiment(dataset_path: str, time_limit: int = 120):
             
             # Generate Gantt chart
             print("   Generating Gantt chart...")
-            fig = solution_utils.draw_gantt(figsize=(1200, 600))
+            fig = solution_utils.draw_gantt()
             print("   ✓ Gantt chart generated (check browser window)")
             
         except Exception as e:
@@ -124,7 +117,7 @@ def main():
     print(f"Selected dataset: {selected_dataset}")
     
     # Run experiment
-    run_experiment(selected_dataset, time_limit=15*60)
+    run_experiment(selected_dataset, time_limit=10)
 
 if __name__ == "__main__":
     main()

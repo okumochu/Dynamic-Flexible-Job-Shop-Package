@@ -1,9 +1,8 @@
 from typing import List, Tuple, Dict, Optional
-import plotly.figure_factory as ff
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import numpy as np
 from benchmark.data_handler import FlexibleJobShopDataHandler
+import matplotlib.pyplot as plt
+import random
 
 class SolutionUtils:
     """
@@ -28,15 +27,17 @@ class SolutionUtils:
         self.validation_result = self._validate_solution()
     
     def _generate_job_colors(self) -> Dict[int, str]:
-        """Generate consistent colors for each job."""
-        # Use a color palette that works well with plotly
-        colors = [
-            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
-            '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5',
-            '#c49c94', '#f7b6d2', '#c7c7c7', '#dbdb8d', '#9edae5'
-        ]
-        return {job_id: colors[job_id % len(colors)] for job_id in range(self.num_jobs)}
+        """Generate exactly num_jobs unique colors by random sampling."""
+        colors = []
+        random.seed(42)  # For reproducibility
+        def random_color():
+            return f"#{random.randint(0, 0xFFFFFF):06x}"
+        for i in range(self.num_jobs):
+            color = random_color()
+            while color in colors:
+                color = random_color()
+            colors.append(color)
+        return {job_id: colors[job_id] for job_id in range(self.num_jobs)}
     
     def _validate_solution(self) -> Dict:
         """
@@ -115,13 +116,10 @@ class SolutionUtils:
         """Get the validation result."""
         return self.validation_result
     
-    def draw_gantt(self, figsize: Tuple[int, int] = (1200, 600), show_validation: bool = True):
+    def draw_gantt(self, show_validation: bool = True):
         """
-        Draw an interactive Gantt chart for the schedule using Plotly.
-        
-        Args:
-            figsize: Figure size (width, height) in pixels
-            show_validation: Whether to show validation results in title
+        Draw a numeric Gantt chart for the schedule using Plotly (minutes, not datetime).
+        Each operation is a bar on its assigned machine, colored by job.
         """
         if not self.validation_result["is_valid"] and show_validation:
             print("Warning: Solution has validation violations:")
@@ -129,93 +127,45 @@ class SolutionUtils:
                 print(f"  - {violation}")
         
         # Prepare data for plotly
-        gantt_data = []
-        
-        for machine_id, operations in self.machine_schedule.items():
-            for op_id, start_time in operations:
-                # Get operation info
+        bars = []
+        yticks = []
+        machine_ids = sorted(self.machine_schedule.keys())
+        for machine_id in machine_ids:
+            yticks.append(f"Machine {machine_id}")
+            for op_id, start_time in self.machine_schedule[machine_id]:
                 job_id, op_index = self.data_handler.get_operation_info(op_id)
                 processing_time = self.data_handler.get_processing_time(op_id, machine_id)
-                end_time = start_time + processing_time
-                
-                # Create task name
-                task_name = f"Machine {machine_id} - Job {job_id}-{op_index}"
-                
-                # Add to gantt data
-                gantt_data.append(dict(
-                    Task=f"Machine {machine_id}",
-                    Start=start_time,
-                    Finish=end_time,
-                    Resource=f"Job {job_id}",
-                    Operation=f"O{op_index}",
-                    ProcessingTime=processing_time,
-                    OperationID=op_id,
-                    JobID=job_id
+                start_time = float(start_time)
+                end_time = start_time + float(processing_time)
+                color = self.job_colors[job_id]
+                bars.append(go.Bar(
+                    x=[processing_time],
+                    y=[f"Machine {machine_id}"],
+                    base=[start_time],
+                    orientation='h',
+                    marker_color=color,
+                    customdata=[[job_id, op_index, start_time, end_time, processing_time, op_id]],
+                    hovertemplate=(
+                        "Job %{customdata[0]}-O%{customdata[1]}<br>" +
+                        "Machine: %{y}<br>" +
+                        "Start: %{customdata[2]:.2f} min<br>" +
+                        "End: %{customdata[3]:.2f} min<br>" +
+                        "Duration: %{customdata[4]} min<br>" +
+                        "Operation ID: %{customdata[5]}<br>"
+                    ),
+                    showlegend=False
                 ))
-        
-        # Create the Gantt chart
-        fig = ff.create_gantt(
-            gantt_data,
-            colors=self.job_colors,
-            index_col='Resource',
-            show_colorbar=True,
-            group_tasks=True,
-            showgrid_x=True,
-            showgrid_y=True,
-            height=figsize[1]
-        )
-        
-        # Update layout
+        fig = go.Figure(data=bars)
         fig.update_layout(
-            title=f"Flexible Job Shop Schedule - Makespan: {self.validation_result['makespan']}",
-            xaxis_title="Time",
+            title=f"{self.num_jobs} Jobs, {self.num_operations} Operations, Makespan: {self.validation_result['makespan']}",
+            xaxis_title="Time (minutes)",
             yaxis_title="Machine",
-            width=figsize[0],
-            height=figsize[1],
             font=dict(size=12),
-            hovermode='closest'
+            yaxis=dict(categoryorder='array', categoryarray=yticks),
+            xaxis=dict(rangemode='tozero'),
+            hovermode='closest',
+            barmode='stack',
+            legend_title_text='Job'
         )
-        
-        # Customize hover template
-        fig.update_traces(
-            hovertemplate="<b>%{customdata[0]}</b><br>" +
-                         "Machine: %{y}<br>" +
-                         "Start: %{x[0]}<br>" +
-                         "End: %{x[1]}<br>" +
-                         "Duration: %{customdata[1]} minutes<br>" +
-                         "Operation ID: %{customdata[2]}<br>" +
-                         "Job ID: %{customdata[3]}<extra></extra>",
-            customdata=[[f"Job {d['JobID']}-{d['Operation']}", d['ProcessingTime'], d['OperationID'], d['JobID']] for d in gantt_data]
-        )
-        
-        # Show the plot
         fig.show()
-        
         return fig
-    
-    def get_schedule_summary(self) -> str:
-        """Get a formatted summary of the schedule."""
-        result = self.validation_result
-        
-        summary = f"""Schedule Summary:
-Makespan: {result['makespan']}
-Scheduled Operations: {result['scheduled_operations']}/{result['total_operations']}
-Valid: {result['is_valid']}
-
-Machine Schedule:"""
-        
-        for machine_id in sorted(self.machine_schedule.keys()):
-            operations = self.machine_schedule[machine_id]
-            summary += f"\nMachine {machine_id}:"
-            for op_id, start_time in sorted(operations, key=lambda x: x[1]):
-                job_id, op_index = self.data_handler.get_operation_info(op_id)
-                processing_time = self.data_handler.get_processing_time(op_id, machine_id)
-                end_time = start_time + processing_time
-                summary += f"\n  - Operation {op_id} (Job {job_id}-{op_index}): {start_time}-{end_time} (duration: {processing_time})"
-        
-        if result['violations']:
-            summary += "\n\nViolations:"
-            for violation in result['violations']:
-                summary += f"\n  - {violation}"
-        
-        return summary 

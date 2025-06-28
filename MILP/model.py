@@ -1,8 +1,8 @@
 import gurobipy as gp
 from gurobipy import GRB
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import numpy as np
-from benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 
 
 class MILP:
@@ -14,23 +14,29 @@ class MILP:
     - x[i,k]: Binary variable = 1 if operation i is assigned to machine k
     - z[i,j,k]: Binary variable = 1 if operation i precedes operation j on machine k (for unordered pairs sharing a compatible machine)
     - C_max: Makespan (continuous)
+    - T[j]: Tardiness of job j (continuous)
     
     Constraints:
     1. Routing: Each operation assigned to exactly one machine (sum_k x[i,k] = 1)
     2. Disjunctive capacity: For each unordered pair (i,j) and machine k both can use, s[i] + p[i,k] <= s[j] + M*(1-z[i,j,k]), s[j] + p[j,k] <= s[i] + M*z[i,j,k], and z[i,j,k] + z[j,i,k] = x[i,k] + x[j,k] - 1
     3. Job precedence: s[current] >= s[prev] + sum_k p[prev,k]*x[prev,k]
     4. Makespan: C_max >= s[i] + sum_k p[i,k]*x[i,k]
-    Objective: Minimize C_max
+    5. Tardiness: T[j] >= C[j] - d[j], T[j] >= 0 (where C[j] is completion time of job j)
+    
+    Objective: Minimize α * C_max + (1-α) * sum(w[j] * T[j])
+    where α is the weight for makespan vs weighted tardiness
     """
     
-    def __init__(self, data_handler: FlexibleJobShopDataHandler):
+    def __init__(self, data_handler: FlexibleJobShopDataHandler, twt_weight: float = 0.5):
         """
         Initialize the MILP model.
         
         Args:
             data_handler: FlexibleJobShopDataHandler instance containing problem data
+            twt_weight: Weight for total weighted tardiness (0.0 = makespan only, 1.0 = TWT only, 0.5 = balanced)
         """
         self.data_handler = data_handler
+        self.twt_weight = twt_weight
         
         # Problem dimensions
         self.num_jobs = data_handler.num_jobs
@@ -40,12 +46,12 @@ class MILP:
         self.job_operations = data_handler.get_job_operations_list()
         self.operation_machines = data_handler.get_operation_machines_list()
         
+        # Due dates and weights
+        self.due_dates = data_handler.get_job_due_dates()
+        self.weights = data_handler.get_job_weights()
+        
         # Gurobi model
-        self.model = None
-        self.s = None  # Start times
-        self.x = None  # Routing
-        self.z = None  # Disjunctive sequencing
-        self.C_max = None
+        self.model = gp.Model("FlexibleJobShop")
         self.pair_indices = []  # (i, j, k) for unordered pairs sharing a machine
         self.heuristic_makespan = int(np.sum(self.processing_times))
         self.min_processing_time = int(np.min(self.processing_times[np.nonzero(self.processing_times)]))
@@ -60,15 +66,13 @@ class MILP:
         """
         return self.data_handler.get_operation_info(operation_id)
 
-    def build_model(self, time_limit: int = None, MIPFocus: int = 1, verbose: int = 0):
+    def build_model(self, time_limit: Optional[int] = None, MIPFocus: int = 1, verbose: int = 0):
         """Build the MILP model with all variables and constraints.
         
         Args:
             time_limit: Time limit for the solver in seconds
             MIPFocus: MIPFocus parameter for Gurobi (1: balance optimality and feasibility, 2: balance optimality and bound tightening, 3: balance feasibility and bound tightening)
         """
-        # Create Gurobi model
-        self.model = gp.Model("FlexibleJobShop")
         
         # Set model parameters for better performance
         if time_limit is not None: self.model.setParam('TimeLimit', time_limit)
@@ -110,6 +114,9 @@ class MILP:
         
         # Makespan
         self.C_max = self.model.addVar(vtype=GRB.CONTINUOUS, name="C_max")
+        
+        # Tardiness variables
+        self.T = self.model.addVars(self.num_jobs, vtype=GRB.CONTINUOUS, name="T")
     
     def _create_constraints(self):
         
@@ -141,6 +148,7 @@ class MILP:
                     name=f"activate_{i}_{j}_{k}"
                 )
     
+        # Job precedence constraints
         for job_id in range(self.num_jobs):
             for op_index in range(1, len(self.job_operations[job_id])):
                 current_op = self.job_operations[job_id][op_index]
@@ -152,6 +160,7 @@ class MILP:
                     name=f"precedence_{current_op}_{prev_op}"
                 )
     
+        # Makespan constraints
         for i in range(self.num_operations):
             job_id, op_index = self.get_operation_info(i)
             compatible_machines = self.operation_machines[job_id][op_index]
@@ -160,9 +169,31 @@ class MILP:
                 name=f"makespan_{i}"
             )
         
+        # Tardiness constraints
+        for job_id in range(self.num_jobs):
+            # Get the last operation of this job
+            last_op = self.job_operations[job_id][-1]
+            job_id_check, op_index = self.get_operation_info(last_op)
+            compatible_machines = self.operation_machines[job_id][op_index]
+            
+            # T[j] >= C[j] - d[j] (tardiness = completion_time - due_date)
+            self.model.addConstr(
+                self.T[job_id] >= self.s[last_op] + gp.quicksum(self.processing_times[last_op][k] * self.x[last_op, k] for k in compatible_machines) - self.due_dates[job_id],
+                name=f"tardiness_{job_id}"
+            )
+            
+            # T[j] >= 0 (tardiness is non-negative)
+            self.model.addConstr(
+                self.T[job_id] >= 0,
+                name=f"tardiness_nonneg_{job_id}"
+            )
+        
     def _set_objective(self):
-        """Set objective function: minimize makespan."""
-        self.model.setObjective(self.C_max, GRB.MINIMIZE)
+        """Set objective function: weighted combination of makespan and total weighted tardiness."""
+        # Weighted objective: α * C_max + (1-α) * sum(w[j] * T[j])
+        makespan_weight = 1.0 - self.twt_weight
+        twt_component = gp.quicksum(self.weights[job_id] * self.T[job_id] for job_id in range(self.num_jobs))
+        self.model.setObjective(makespan_weight * self.C_max + self.twt_weight * twt_component, GRB.MINIMIZE)
     
     def solve(self) -> Dict:
         """
@@ -174,7 +205,9 @@ class MILP:
                 "performance": {
                     "status": str,
                     "objective": float,
-                    "solve_time": float
+                    "solve_time": float,
+                    "makespan": float,
+                    "total_weighted_tardiness": float
                 },
                 "schedule_result": Dict[int, List[Tuple[int, float]]]
             }
@@ -185,11 +218,34 @@ class MILP:
         # Solve the model
         self.model.optimize()
         
+        # Calculate makespan and TWT from solution
+        makespan = self.C_max.X if self.C_max.X is not None else None
+        total_weighted_tardiness = None
+        
+        if self.model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SOLUTION_LIMIT]:
+            # Calculate completion times and TWT
+            completion_times = {}
+            for job_id in range(self.num_jobs):
+                last_op = self.job_operations[job_id][-1]
+                job_id_check, op_index = self.get_operation_info(last_op)
+                compatible_machines = self.operation_machines[job_id][op_index]
+                
+                # Find assigned machine and completion time
+                for k in compatible_machines:
+                    if (last_op, k) in self.x and self.x[last_op, k].X > 0.5:
+                        completion_time = self.s[last_op].X + self.processing_times[last_op][k]
+                        completion_times[job_id] = completion_time
+                        break
+            
+            total_weighted_tardiness = self.data_handler.get_total_weighted_tardiness(completion_times)
+        
         # Performance metrics
         performance = {
             "status": self._get_status_string(self.model.status),
-            "objective": self.C_max.X if self.C_max.X is not None else None,
+            "objective": self.model.objVal if self.model.objVal is not None else None,
             "solve_time": self.model.Runtime,
+            "makespan": makespan,
+            "total_weighted_tardiness": total_weighted_tardiness
         }
         
         # Schedule results

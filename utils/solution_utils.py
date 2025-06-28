@@ -1,6 +1,6 @@
 from typing import List, Tuple, Dict, Optional
 import plotly.graph_objects as go
-from benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 import matplotlib.pyplot as plt
 import random
 
@@ -116,10 +116,14 @@ class SolutionUtils:
         """Get the validation result."""
         return self.validation_result
     
-    def draw_gantt(self, show_validation: bool = True):
+    def draw_gantt(self, show_validation: bool = True, show_due_dates: bool = True):
         """
         Draw a numeric Gantt chart for the schedule using Plotly (minutes, not datetime).
         Each operation is a bar on its assigned machine, colored by job.
+        
+        Args:
+            show_validation: Whether to show validation warnings
+            show_due_dates: Whether to show due date lines and information
         """
         if not self.validation_result["is_valid"] and show_validation:
             print("Warning: Solution has validation violations:")
@@ -130,6 +134,11 @@ class SolutionUtils:
         bars = []
         yticks = []
         machine_ids = sorted(self.machine_schedule.keys())
+        
+        # Get due dates and weights for jobs
+        due_dates = self.data_handler.get_job_due_dates()
+        weights = self.data_handler.get_job_weights()
+        
         for machine_id in machine_ids:
             yticks.append(f"Machine {machine_id}")
             for op_id, start_time in self.machine_schedule[machine_id]:
@@ -138,26 +147,69 @@ class SolutionUtils:
                 start_time = float(start_time)
                 end_time = start_time + float(processing_time)
                 color = self.job_colors[job_id]
+                
+                # Get due date and weight for this job
+                due_date = due_dates[job_id]
+                weight = weights[job_id]
+                
+                # Calculate tardiness for this job (if this is the last operation)
+                job_operations = self.data_handler.get_job_operations(job_id)
+                is_last_operation = (op_index == len(job_operations) - 1)
+                tardiness = max(0, end_time - due_date) if is_last_operation else 0
+                
                 bars.append(go.Bar(
                     x=[processing_time],
                     y=[f"Machine {machine_id}"],
                     base=[start_time],
                     orientation='h',
                     marker_color=color,
-                    customdata=[[job_id, op_index, start_time, end_time, processing_time, op_id]],
+                    customdata=[[job_id, op_index, start_time, end_time, processing_time, op_id, due_date, weight, tardiness, is_last_operation]],
                     hovertemplate=(
                         "Job %{customdata[0]}-O%{customdata[1]}<br>" +
                         "Machine: %{y}<br>" +
                         "Start: %{customdata[2]:.2f} min<br>" +
                         "End: %{customdata[3]:.2f} min<br>" +
                         "Duration: %{customdata[4]} min<br>" +
-                        "Operation ID: %{customdata[5]}<br>"
+                        "Operation ID: %{customdata[5]}<br>" +
+                        "Due Date: %{customdata[6]} min<br>" +
+                        "Weight: %{customdata[7]}<br>" +
+                        ("Tardiness: %{customdata[8]:.1f} min" if "%{customdata[9]}" else "Tardiness: N/A") + "<br>"
                     ),
                     showlegend=False
                 ))
+        
         fig = go.Figure(data=bars)
+        
+        # Add due date lines if requested
+        if show_due_dates:
+            for job_id in range(self.num_jobs):
+                due_date = due_dates[job_id]
+                weight = weights[job_id]
+                
+                # Add a vertical line for each job's due date
+                fig.add_vline(
+                    x=due_date,
+                    line_dash="dash",
+                    line_color=self.job_colors[job_id],
+                    opacity=0.7
+                )
+        
+        # Calculate total weighted tardiness
+        total_twt = 0
+        job_completion_times = {}
+        for job_id in range(self.num_jobs):
+            job_operations = self.data_handler.get_job_operations(job_id)
+            last_op = job_operations[-1]
+            if last_op.operation_id in self.validation_result["operation_end_times"]:
+                completion_time = self.validation_result["operation_end_times"][last_op.operation_id]
+                job_completion_times[job_id] = completion_time
+                tardiness = max(0, completion_time - due_dates[job_id])
+                total_twt += weights[job_id] * tardiness
+        
         fig.update_layout(
-            title=f"{self.num_jobs} Jobs, {self.num_operations} Operations, Makespan: {self.validation_result['makespan']}",
+            title=f"{self.num_jobs} Jobs, {self.num_operations} Operations<br>"
+                  f"Makespan: {self.validation_result['makespan']:.1f} min, "
+                  f"Total Weighted Tardiness: {total_twt:.1f}",
             xaxis_title="Time (minutes)",
             yaxis_title="Machine",
             font=dict(size=12),
@@ -167,5 +219,6 @@ class SolutionUtils:
             barmode='stack',
             legend_title_text='Job'
         )
+        
         fig.show()
         return fig

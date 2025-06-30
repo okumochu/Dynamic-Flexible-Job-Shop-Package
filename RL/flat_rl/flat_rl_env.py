@@ -205,7 +205,7 @@ class FlatRLEnv(gym.Env):
         return torch.tensor(obs, dtype=torch.float32)
     
     def _get_action_mask(self) -> torch.Tensor:
-        """Get boolean mask for valid actions (no do-nothing)."""
+        """Get boolean mask for valid actions"""
         mask = torch.zeros(self.action_dim, dtype=torch.bool)
         action_idx = 0
         max_ops_per_job = max(len(job.operations) for job in self.jobs)

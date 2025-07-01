@@ -1,0 +1,26 @@
+{
+  "dataset": "mk06.txt",
+  "problem_size": {
+    "jobs": 10,
+    "machines": 10,
+    "operations": 150
+  },
+  "rl_results": {
+    "training_episodes": 2000,
+    "training_time": 7569.468297481537,
+    "final_avg_makespan": 719.55,
+    "final_avg_twt": 34207.8,
+    "best_makespan": 662.0,
+    "best_twt": 31012.0,
+    "validation_valid": false
+  },
+  "milp_results": {
+    "status": "error",
+    "makespan": Infinity,
+    "twt": Infinity,
+    "solve_time": 0,
+    "validation": null,
+    "schedule": null
+  },
+  "comparison": {}
+}

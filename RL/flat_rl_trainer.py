@@ -12,9 +12,10 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import gym
 from gym import spaces
-
-from .flat_rl_env import FlatRLEnv
-from .ppo_agent import PPOAgent, PPOBuffer
+import wandb
+from RL.PPO.ppo_worker import PPOWorker
+from RL.PPO.buffer import PPOBuffer
+from RL.flat_rl_env import FlatRLEnv
 
 class FlatRLTrainer:
     """
@@ -33,7 +34,7 @@ class FlatRLTrainer:
                  value_coeff: float = 0.5,
                  max_grad_norm: float = 0.5,
                  device: str = 'auto',
-                 model_save_dir: str = 'result/flat_rl_model'):
+                 model_save_dir: str = 'result/flat_rl/model'):
         """
         Initialize the trainer.
         
@@ -57,11 +58,13 @@ class FlatRLTrainer:
         os.makedirs(model_save_dir, exist_ok=True)
         
         # Initialize agent
-        obs_shape = cast(Tuple[int, int, int], env.observation_space.shape)
+        # Ensure obs_shape is always a 1D tuple (obs_dim,) for flat state vectors
+        
+        obs_dim = env.obs_len
+        obs_shape = (obs_dim,)
         action_space = cast(spaces.Discrete, env.action_space)
         action_dim = action_space.n
-        
-        self.agent = PPOAgent(
+        self.agent = PPOWorker(
             obs_shape=obs_shape,
             action_dim=action_dim,
             hidden_dim=hidden_dim,
@@ -109,90 +112,87 @@ class FlatRLTrainer:
             Dictionary containing training results
         """
         # Initialize buffer
-        obs_shape = cast(Tuple[int, int, int], self.env.observation_space.shape)
+        obs_dim = self.env.obs_len
+        obs_shape = (obs_dim,)
         action_space = cast(spaces.Discrete, self.env.action_space)
         action_dim = action_space.n
         buffer = PPOBuffer(buffer_size, obs_shape, action_dim, self.agent.device)
+        
+        # Initialize wandb
+        wandb.init(
+            project="Flexible-Job-Shop-RL",
+            config={
+                "num_episodes": num_episodes,
+                "buffer_size": buffer_size,
+                "update_frequency": update_frequency,
+                "eval_frequency": eval_frequency,
+                "save_frequency": save_frequency,
+                "hidden_dim": self.agent.policy.backbone[0].out_features,
+                "lr": self.agent.policy_optimizer.param_groups[0]['lr'],
+                "gamma": self.agent.gamma,
+                "gae_lambda": self.agent.gae_lambda,
+                "clip_ratio": self.agent.clip_ratio,
+                "entropy_coeff": self.agent.entropy_coeff,
+                "value_coeff": self.agent.value_coeff,
+                "max_grad_norm": self.agent.max_grad_norm,
+            }
+        )
         
         start_time = time.time()
         
         # Training loop with progress bar
         pbar = tqdm(range(num_episodes), desc="Training Progress")
-        
         for episode in pbar:
             obs = self.env.reset()
             total_reward = 0
             step_count = 0
-            
-            # Episode loop
             while True:
-                # Get action mask
                 action_mask = self.env.get_action_mask()
-                
-                # Get action from agent
+                if not action_mask.any():
+                    break
                 action, log_prob, value = self.agent.get_action(obs, action_mask)
-                
-                # Take step in environment
                 next_obs, reward, done, info = self.env.step(action)
-                
-                # Store transition in buffer
                 buffer.add(obs, action, reward, value, log_prob, action_mask, done)
-                
                 total_reward += reward
                 obs = next_obs
                 step_count += 1
-                
                 if done:
                     break
-            
-            # Update agent if buffer is full enough
+            # Only log necessary episode stats to wandb
+            makespan = info.get('makespan', 0)
+            twt = info.get('twt', 0)
+            alpha = getattr(self.env, 'alpha', 0.5)
+            objective = alpha * makespan + (1 - alpha) * twt
+            wandb.log({
+                "episode": episode,
+                "reward": total_reward,
+                "makespan": makespan,
+                "twt": twt,
+                "objective": objective
+            })
+            self.training_history['episode_rewards'].append(total_reward)
+            self.training_history['episode_makespans'].append(makespan)
+            self.training_history['episode_twts'].append(twt)
             if buffer.size >= update_frequency and episode % update_frequency == 0:
                 stats = self.agent.update(buffer, num_epochs=4)
                 self.training_history['training_stats'].append(stats)
                 buffer.clear()
-            
-            # Record episode statistics
-            self.training_history['episode_rewards'].append(total_reward)
-            self.training_history['episode_makespans'].append(info['makespan'])
-            self.training_history['episode_twts'].append(info['twt'])
-            
-            # Update progress bar
-            if len(self.training_history['episode_rewards']) >= 50:
-                avg_reward = np.mean(self.training_history['episode_rewards'][-50:])
-                avg_makespan = np.mean(self.training_history['episode_makespans'][-50:])
-                avg_twt = np.mean(self.training_history['episode_twts'][-50:])
-                pbar.set_postfix({
-                    'Avg Reward': f'{avg_reward:.3f}',
-                    'Avg Makespan': f'{avg_makespan:.1f}',
-                    'Avg TWT': f'{avg_twt:.1f}'
+                wandb.log({
+                    "policy_loss": stats["policy_loss"],
+                    "value_loss": stats["value_loss"],
+                    "entropy_loss": stats["entropy_loss"],
+                    "total_loss": stats["total_loss"],
+                    "clip_fraction": stats["clip_fraction"]
                 })
-            
-            # Evaluate periodically
-            if (episode + 1) % eval_frequency == 0:
-                eval_results = self.evaluate(num_episodes=5)
-                self.training_history['evaluation_results'].append({
-                    'episode': episode + 1,
-                    'results': eval_results
-                })
-            
-            # Save model periodically
-            if (episode + 1) % save_frequency == 0:
-                self.save_model(f"checkpoint_episode_{episode + 1}.pth")
-        
         training_time = time.time() - start_time
         pbar.close()
-        
-        # Save final model
         self.save_model("final_model.pth")
-        
-        print(f"Training completed in {training_time:.2f} seconds")
-        
+        wandb.finish()
         return {
             'episode_rewards': self.training_history['episode_rewards'],
             'episode_makespans': self.training_history['episode_makespans'],
             'episode_twts': self.training_history['episode_twts'],
             'training_stats': self.training_history['training_stats'],
-            'evaluation_results': self.training_history['evaluation_results'],
             'training_time': training_time
         }
     
@@ -261,103 +261,4 @@ class FlatRLTrainer:
             print(f"Model loaded from {filepath}")
         else:
             print(f"Model file {filepath} not found")
-    
-    def plot_training_curves(self, save_path: Optional[str] = None):
-        """Plot training curves."""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # Episode rewards
-        axes[0, 0].plot(self.training_history['episode_rewards'])
-        axes[0, 0].set_title('Episode Rewards')
-        axes[0, 0].set_xlabel('Episode')
-        axes[0, 0].set_ylabel('Reward')
-        axes[0, 0].grid(True)
-        
-        # Episode makespans
-        axes[0, 1].plot(self.training_history['episode_makespans'])
-        axes[0, 1].set_title('Episode Makespans')
-        axes[0, 1].set_xlabel('Episode')
-        axes[0, 1].set_ylabel('Makespan')
-        axes[0, 1].grid(True)
-        
-        # Episode TWT
-        axes[1, 0].plot(self.training_history['episode_twts'])
-        axes[1, 0].set_title('Episode Total Weighted Tardiness')
-        axes[1, 0].set_xlabel('Episode')
-        axes[1, 0].set_ylabel('TWT')
-        axes[1, 0].grid(True)
-        
-        # Training losses
-        if self.training_history['training_stats']:
-            policy_losses = [stats['policy_loss'] for stats in self.training_history['training_stats']]
-            value_losses = [stats['value_loss'] for stats in self.training_history['training_stats']]
-            
-            axes[1, 1].plot(policy_losses, label='Policy Loss')
-            axes[1, 1].plot(value_losses, label='Value Loss')
-            axes[1, 1].set_title('Training Losses')
-            axes[1, 1].set_xlabel('Update Step')
-            axes[1, 1].set_ylabel('Loss')
-            axes[1, 1].legend()
-            axes[1, 1].grid(True)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Training curves saved to {save_path}")
-        
-        plt.show()
-    
-    def plot_evaluation_progress(self, save_path: Optional[str] = None):
-        """Plot evaluation progress over training."""
-        if not self.training_history['evaluation_results']:
-            print("No evaluation results to plot")
-            return
-        
-        episodes = [result['episode'] for result in self.training_history['evaluation_results']]
-        avg_makespans = [result['results']['avg_makespan'] for result in self.training_history['evaluation_results']]
-        avg_twts = [result['results']['avg_twt'] for result in self.training_history['evaluation_results']]
-        
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-        
-        # Makespan progress
-        ax1.plot(episodes, avg_makespans, 'b-o')
-        ax1.set_title('Average Makespan Progress')
-        ax1.set_xlabel('Episode')
-        ax1.set_ylabel('Makespan')
-        ax1.grid(True)
-        
-        # TWT progress
-        ax2.plot(episodes, avg_twts, 'r-o')
-        ax2.set_title('Average TWT Progress')
-        ax2.set_xlabel('Episode')
-        ax2.set_ylabel('TWT')
-        ax2.grid(True)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Evaluation progress saved to {save_path}")
-        
-        plt.show()
-    
-    def get_best_schedule(self, num_episodes: int = 10) -> Tuple[Dict, float, float]:
-        """
-        Get the best schedule from multiple evaluations.
-        
-        Args:
-            num_episodes: Number of episodes to evaluate
-            
-        Returns:
-            Tuple of (best_schedule, best_makespan, best_twt)
-        """
-        eval_results = self.evaluate(num_episodes)
-        
-        # Find best schedule (lowest makespan)
-        best_idx = np.argmin(eval_results['makespans'])
-        best_schedule = eval_results['schedules'][best_idx]
-        best_makespan = eval_results['makespans'][best_idx]
-        best_twt = eval_results['twts'][best_idx]
-        
-        return best_schedule, best_makespan, best_twt
+

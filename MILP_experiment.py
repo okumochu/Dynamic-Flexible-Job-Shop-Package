@@ -31,16 +31,17 @@ def run_experiment(data_source, data_type: str, time_limit: int = 600, twt_weigh
         print(f"   - Jobs: {data_handler.num_jobs}")
         print(f"   - Machines: {data_handler.num_machines}")
         print(f"   - Operations: {data_handler.num_operations}")
-        print(f"   - Total Processing Time: {data_handler.get_total_processing_time()}")
         
         # Show due date and weight information
-        due_dates = data_handler.get_job_due_dates()
-        weights = data_handler.get_job_weights()
+        due_dates = data_handler.get_jobs_due_date()
+        weights = data_handler.get_jobs_weight()
         print(f"   - Average Due Date: {sum(due_dates) / len(due_dates):.1f}")
         print(f"   - Average Weight: {sum(weights) / len(weights):.1f}")
         
     except Exception as e:
         print(f"   ❌ Error loading {data_type}: {e}")
+        import traceback
+        traceback.print_exc()
         return
     
     # Step 2: Create and solve MILP model
@@ -51,6 +52,7 @@ def run_experiment(data_source, data_type: str, time_limit: int = 600, twt_weigh
         # Build model
         print("   Building model...")
         milp_model.build_model(time_limit=time_limit, MIPFocus=1, verbose=0)
+        print("   ✓ Model built successfully")
         
         # Solve model
         print("   Solving model...")
@@ -67,6 +69,8 @@ def run_experiment(data_source, data_type: str, time_limit: int = 600, twt_weigh
 
     except Exception as e:
         print(f"   ❌ Error solving MILP: {e}")
+        import traceback
+        traceback.print_exc()
         return
     
     # Step 3: Validate and visualize solution
@@ -98,6 +102,8 @@ def run_experiment(data_source, data_type: str, time_limit: int = 600, twt_weigh
             
         except Exception as e:
             print(f"   ❌ Error in validation/visualization: {e}")
+            import traceback
+            traceback.print_exc()
     else:
         print(f"\n3. No solution found - skipping validation and visualization")
     
@@ -111,62 +117,28 @@ def run_simulation_experiment():
     print("SIMULATION EXPERIMENT")
     print("=" * 80)
     
-    # Simulation parameters for 20 jobs, 5 machines
+    # Simulation parameters for a more complex problem
     simulation_params = {
-        'num_jobs': 10,
+        'num_jobs': 8, 
         'num_machines': 4,
-        'operation_lb': 3,
-        'operation_ub': 6,
-        'processing_time_lb': 10,
-        'processing_time_ub': 40,
+        'operation_lb': 2,
+        'operation_ub': 4,
+        'processing_time_lb': 3,
+        'processing_time_ub': 8,   
         'compatible_machines_lb': 2,
-        'compatible_machines_ub': 4,
+        'compatible_machines_ub': 3,
         'seed': 42,
-        'TF': 0.4,
-        'RDD': 0.6
     }
     
-    run_experiment(simulation_params, "simulation", time_limit=1800, twt_weight=0.5)
+    run_experiment(simulation_params, "simulation", time_limit=3600, twt_weight=0)
 
-def run_dataset_experiment():
-    """Run experiment with dataset."""
-    print("\n" + "=" * 80)
-    print("DATASET EXPERIMENT")
-    print("=" * 80)
-    
-    # List of available datasets
-    datasets = [
-        "benchmarks/static_benchmark/datasets/brandimarte/mk01.txt",
-        "benchmarks/static_benchmark/datasets/brandimarte/mk02.txt", 
-        "benchmarks/static_benchmark/datasets/brandimarte/mk03.txt",
-        "benchmarks/static_benchmark/datasets/brandimarte/mk04.txt",
-        "benchmarks/static_benchmark/datasets/brandimarte/mk05.txt",
-        "benchmarks/static_benchmark/datasets/hurink/edata/la01.txt",
-        "benchmarks/static_benchmark/datasets/hurink/edata/la02.txt",
-        "benchmarks/static_benchmark/datasets/hurink/edata/la03.txt"
-    ]
-    
-    # Filter to only existing datasets
-    available_datasets = [d for d in datasets if os.path.exists(d)]
-    
-    if not available_datasets:
-        print("❌ No datasets found!")
-        return
-    
-    # Select a dataset (using mk01 for consistency)
-    selected_dataset = "benchmarks/static_benchmark/datasets/brandimarte/mk01.txt"
-    if not os.path.exists(selected_dataset):
-        selected_dataset = available_datasets[0]
-    
-    print(f"Selected dataset: {selected_dataset}")
-    run_experiment(selected_dataset, "dataset", time_limit=600, twt_weight=0.5)
 
 def main():
     """Main function to run experiments."""
     
     print("FLEXIBLE JOB SHOP - MILP EXPERIMENTS")
-    print("Testing both simulation and dataset with TWT optimization")
-    print("Parameters: 10 minutes time limit, TWT weight = 0.5, verbose = 0")
+    print("Testing complex simulation with TWT optimization")
+    print("Parameters: 60 minutes time limit, TWT weight = 0.3, verbose = 0")
     
     # Run simulation experiment
     run_simulation_experiment()

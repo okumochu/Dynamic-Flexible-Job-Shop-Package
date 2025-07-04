@@ -113,8 +113,8 @@ class DataGenerator:
     @staticmethod
     def _generate_due_dates_and_weights(
         job_processing_times: List[int],
-        TF: float = 0.3,
-        RDD: float = 0.6,
+        TF: float,
+        RDD: float,
         seed: Optional[int] = None
     ) -> Tuple[List[int], List[int]]:
         """
@@ -169,8 +169,8 @@ class DataGenerator:
         compatible_machines_lb: int = 1,
         compatible_machines_ub: Optional[int] = None,
         seed: Optional[int] = None,
-        TF: float = 0.3,
-        RDD: float = 0.6
+        TF: float = 0.4,
+        RDD: float = 0.8
     ) -> Tuple[List[Job], List[Operation], int, int, int]:
         """
         Generate synthetic FJSP data with specified parameters.
@@ -186,7 +186,9 @@ class DataGenerator:
             compatible_machines_ub: Upper bound for number of compatible machines per operation (default: num_machines)
             seed: Random seed for reproducibility
             TF: Tardiness Factor for due date generation (0.2, 0.4, 0.6, 0.8, 1.0)
+                High TF means relaxed due dates
             RDD: Relative Range of Due Dates (0.2, 0.4, 0.6, 0.8, 1.0)
+                High RDD means due dates are more spread out
             
         Returns:
             Tuple of (jobs, operations, num_jobs, num_machines, num_operations)

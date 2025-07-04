@@ -5,3 +5,5 @@ plotly
 torch
 gym
 tqdm
+kaleido
+wandb

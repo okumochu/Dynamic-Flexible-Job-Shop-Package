@@ -13,12 +13,13 @@ class SolutionUtils:
         machine_schedule: Dictionary mapping machine_id to list of (operation_id, start_time) tuples
     """
     
-    def __init__(self, data_handler: FlexibleJobShopDataHandler, machine_schedule: Dict[int, List[Tuple[int, int]]]):
+    def __init__(self, data_handler: FlexibleJobShopDataHandler, machine_schedule: Dict[int, List[Tuple[int, int]]], tolerance: float = 1e-4):
         self.data_handler = data_handler
         self.machine_schedule = machine_schedule
         self.num_jobs = data_handler.num_jobs
         self.num_machines = data_handler.num_machines
         self.num_operations = data_handler.num_operations
+        self.tolerance = tolerance  # Tolerance for floating-point comparisons
         
         # Generate consistent colors for jobs
         self.job_colors = self._generate_job_colors()
@@ -38,6 +39,18 @@ class SolutionUtils:
                 color = random_color()
             colors.append(color)
         return {job_id: colors[job_id] for job_id in range(self.num_jobs)}
+    
+    def _is_greater_than(self, a: float, b: float) -> bool:
+        """Compare two floats with tolerance to avoid precision errors."""
+        return a > b + self.tolerance
+    
+    def _is_less_than(self, a: float, b: float) -> bool:
+        """Compare two floats with tolerance to avoid precision errors."""
+        return a < b - self.tolerance
+    
+    def _is_equal(self, a: float, b: float) -> bool:
+        """Compare two floats for equality with tolerance."""
+        return abs(a - b) <= self.tolerance
     
     def _validate_solution(self) -> Dict:
         """
@@ -81,7 +94,9 @@ class SolutionUtils:
                     prev_processing_time = self.data_handler.get_processing_time(prev_op_id, machine_id)
                     prev_end = prev_start + prev_processing_time
                     
-                    if start_time < prev_end and end_time > prev_start:
+                    # Use tolerance for floating-point comparisons to avoid precision errors
+                    if (self._is_less_than(start_time, prev_end) and 
+                        self._is_greater_than(end_time, prev_start)):
                         violations.append(f"Overlap on machine {machine_id}: operations {prev_op_id} and {op_id}")
         
         # Check job precedence constraints
@@ -92,7 +107,8 @@ class SolutionUtils:
                 prev_op = job_operations[i-1]
                 
                 if current_op.operation_id in operation_end_times and prev_op.operation_id in operation_end_times:
-                    if operation_end_times[prev_op.operation_id] > operation_end_times[current_op.operation_id]:
+                    # Use tolerance for floating-point comparisons
+                    if self._is_greater_than(operation_end_times[prev_op.operation_id], operation_end_times[current_op.operation_id]):
                         violations.append(f"Job precedence violation in job {job_id}: operation {prev_op.operation_id} ends after {current_op.operation_id}")
         
         # Check if all operations are scheduled
@@ -136,8 +152,8 @@ class SolutionUtils:
         machine_ids = sorted(self.machine_schedule.keys())
         
         # Get due dates and weights for jobs
-        due_dates = self.data_handler.get_job_due_dates()
-        weights = self.data_handler.get_job_weights()
+        due_dates = self.data_handler.get_jobs_due_date()
+        weights = self.data_handler.get_jobs_weight()
         
         for machine_id in machine_ids:
             yticks.append(f"Machine {machine_id}")

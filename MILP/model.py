@@ -3,7 +3,7 @@ from gurobipy import GRB
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
-
+from itertools import permutations  # for disjunctive constraints
 
 class MILP:
     """
@@ -19,12 +19,12 @@ class MILP:
     Constraints:
     1. Routing: Each operation assigned to exactly one machine (sum_k x[i,k] = 1)
     2. Disjunctive capacity: For each unordered pair (i,j) and machine k both can use, s[i] + p[i,k] <= s[j] + M*(1-z[i,j,k]), s[j] + p[j,k] <= s[i] + M*z[i,j,k], and z[i,j,k] + z[j,i,k] = x[i,k] + x[j,k] - 1
-    3. Job precedence: s[current] >= s[prev] + sum_k p[prev,k]*x[prev,k]
+    3. Operation precedence: s[current] >= s[prev] + sum_k p[prev,k]*x[prev,k]
     4. Makespan: C_max >= s[i] + sum_k p[i,k]*x[i,k]
     5. Tardiness: T[j] >= C[j] - d[j], T[j] >= 0 (where C[j] is completion time of job j)
     
-    Objective: Minimize α * C_max + (1-α) * sum(w[j] * T[j])
-    where α is the weight for makespan vs weighted tardiness
+    Objective: Minimize alpha * C_max + (1-alpha) * sum(w[j] * T[j])
+    where alpha is the weight for makespan vs weighted tardiness
     """
     
     def __init__(self, data_handler: FlexibleJobShopDataHandler, twt_weight: float = 0.5):
@@ -43,28 +43,17 @@ class MILP:
         self.num_machines = data_handler.num_machines
         self.num_operations = data_handler.num_operations
         self.processing_times = data_handler.processing_time_matrix
-        self.job_operations = data_handler.get_job_operations_list()
-        self.operation_machines = data_handler.get_operation_machines_list()
+        self.job_operations = data_handler.get_operations_each_jobs()
+        self.compatible_machines_list = data_handler.get_compatible_machines_each_jobs()
         
         # Due dates and weights
-        self.due_dates = data_handler.get_job_due_dates()
-        self.weights = data_handler.get_job_weights()
+        self.due_dates = data_handler.get_jobs_due_date()
+        self.weights = data_handler.get_jobs_weight()
         
         # Gurobi model
         self.model = gp.Model("FlexibleJobShop")
         self.pair_indices = []  # (i, j, k) for unordered pairs sharing a machine
-        self.heuristic_makespan = int(np.sum(self.processing_times))
-        self.min_processing_time = int(np.min(self.processing_times[np.nonzero(self.processing_times)]))
-        
-    def get_operation_info(self, operation_id: int):
-        """
-        Get job_id and operation_index for a given operation_id.
-        Args:
-            operation_id: Operation ID to look up
-        Returns:
-            Tuple of (job_id, operation_index)
-        """
-        return self.data_handler.get_operation_info(operation_id)
+        self.heuristic_makespan = int(np.sum(self.processing_times)) # upper bound of big-M
 
     def build_model(self, time_limit: Optional[int] = None, MIPFocus: int = 1, verbose: int = 0):
         """Build the MILP model with all variables and constraints.
@@ -93,23 +82,18 @@ class MILP:
     def _create_variables(self):
         """Create decision variables and objective variable"""
         
-        # Start times for each operation
-        self.s = self.model.addVars(self.num_operations, vtype=GRB.CONTINUOUS, name="s")
+        # Start times for each operation (non-negative)
+        self.s = self.model.addVars(self.num_operations, vtype=GRB.CONTINUOUS, lb=0, name="s")
         
         # Routing: x[i,k] = 1 if operation i assigned to machine k
         self.x = self.model.addVars(self.num_operations, self.num_machines, vtype=GRB.BINARY, name="x")
         
-        # Build pair_indices: unordered pairs (i, j, k) where i < j and both can use machine k
-        self.pair_indices = []
+        # Disjunctive sequencing: z[i,j,k] = 1 if i precedes j on k, bi-directional
         for k in range(self.num_machines):
-            # Use data_handler's get_machine_operations to get all operations compatible with machine k
-            ops_on_k = [op.operation_id for op in self.data_handler.get_machine_operations(k)]
-            for idx1 in range(len(ops_on_k)):
-                for idx2 in range(idx1 + 1, len(ops_on_k)):
-                    i, j = ops_on_k[idx1], ops_on_k[idx2]
-                    self.pair_indices.append((i, j, k))
-                    
-        # Disjunctive sequencing: z[i,j,k] = 1 if i precedes j on k
+            operation_on_k = self.data_handler.get_machine_operations(k)
+            operation_id_list = [operation.operation_id for operation in operation_on_k]
+            for i, j in permutations(operation_id_list, 2):
+                self.pair_indices.append((i, j, k))
         self.z = self.model.addVars(self.pair_indices, vtype=GRB.BINARY, name="z")
         
         # Makespan
@@ -122,63 +106,53 @@ class MILP:
         
         # Routing: Each operation assigned to exactly one machine
         for i in range(self.num_operations):
-            job_id, op_index = self.get_operation_info(i)
-            compatible_machines = self.operation_machines[job_id][op_index]
+            job_id, op_position = self.data_handler.get_operation_info(i)
+            compatible_machines = self.compatible_machines_list[job_id][op_position]
             self.model.addConstr(gp.quicksum(self.x[i, k] for k in compatible_machines) == 1, name=f"routing_{i}")
-    
-        M = self.heuristic_makespan - self.min_processing_time
+            # exclude incompatible machines
+            for k in range(self.num_machines):
+                if k not in compatible_machines:
+                    self.model.addConstr(self.x[i, k] == 0, name=f"exclude_incompatible_machines_{i}_{k}")
+        
+        # Disjunctive constraints
         for (i, j, k) in self.pair_indices:
-            # Only for pairs where both can use machine k
-            p_i_k = self.processing_times[i][k]
-            p_j_k = self.processing_times[j][k]
-            # s[i] + p[i,k] <= s[j] + M*(1-z[i,j,k])
-            self.model.addConstr(
-                self.s[i] + p_i_k <= self.s[j] + M * (1 - self.z[i, j, k]),
-                name=f"disj1_{i}_{j}_{k}"
-            )
-            # s[j] + p[j,k] <= s[i] + M*z[i,j,k]
-            self.model.addConstr(
-                self.s[j] + p_j_k <= self.s[i] + M * self.z[i, j, k],
-                name=f"disj2_{i}_{j}_{k}"
-            )
-            # z[i,j,k] + z[j,i,k] = x[i,k] + x[j,k] - 1
-            if (j, i, k) in self.pair_indices:
-                self.model.addConstr(
-                    self.z[i, j, k] + self.z[j, i, k] == self.x[i, k] + self.x[j, k] - 1,
-                    name=f"activate_{i}_{j}_{k}"
-                )
+            # At least one of z[i,j,k] or z[j,i,k] must be 1
+            self.model.addConstr(self.z[i, j, k] + self.z[j, i, k] >= self.x[i, k] + self.x[j, k] - 1, name=f"activate_{i}_{j}_{k}")
+            # At most one of z[i,j,k] or z[j,i,k] can be 1
+            self.model.addConstr(self.z[i, j, k] + self.z[j, i, k] <= 1, name=f"either_or_{i}_{j}_{k}")
+
+            # If z[i,j,k] = 1, then s[i] + p[i,k] <= s[j]
+            self.model.addGenConstrIndicator(self.z[i, j, k],  True, self.s[i] + self.processing_times[i][k] <= self.s[j])
+            self.model.addGenConstrIndicator(self.z[j, i, k],  True, self.s[j] + self.processing_times[j][k] <= self.s[i])
     
-        # Job precedence constraints
+        # Operation precedence constraints
         for job_id in range(self.num_jobs):
-            for op_index in range(1, len(self.job_operations[job_id])):
-                current_op = self.job_operations[job_id][op_index]
-                prev_op = self.job_operations[job_id][op_index - 1]
+            for op_position in range(1, len(self.job_operations[job_id])):
+                current_op = self.job_operations[job_id][op_position]
+                prev_op = self.job_operations[job_id][op_position - 1]
                 # s[current] >= s[prev] + sum_k p[prev,k]*x[prev,k]
                 self.model.addConstr(
-                    self.s[current_op] >= self.s[prev_op] + gp.quicksum(self.processing_times[prev_op][k] * self.x[prev_op, k]
-                                                                        for k in self.operation_machines[job_id][op_index - 1]),
+                    self.s[current_op] >= self.s[prev_op] + gp.quicksum(self.data_handler.get_processing_time(prev_op, k) * self.x[prev_op, k]
+                                                                        for k in self.compatible_machines_list[job_id][op_position - 1]),
                     name=f"precedence_{current_op}_{prev_op}"
                 )
-    
-        # Makespan constraints
-        for i in range(self.num_operations):
-            job_id, op_index = self.get_operation_info(i)
-            compatible_machines = self.operation_machines[job_id][op_index]
-            self.model.addConstr(
-                self.C_max >= self.s[i] + gp.quicksum(self.processing_times[i][k] * self.x[i, k] for k in compatible_machines),
-                name=f"makespan_{i}"
-            )
         
-        # Tardiness constraints
+        # Objective constraints
         for job_id in range(self.num_jobs):
             # Get the last operation of this job
-            last_op = self.job_operations[job_id][-1]
-            job_id_check, op_index = self.get_operation_info(last_op)
-            compatible_machines = self.operation_machines[job_id][op_index]
-            
+            last_op_id = self.job_operations[job_id][-1]
+            job_id_check, op_position = self.data_handler.get_operation_info(last_op_id)
+            compatible_machines = self.compatible_machines_list[job_id][op_position]
+
+
+            self.model.addConstr(
+                self.C_max >= self.s[last_op_id] + gp.quicksum(self.data_handler.get_processing_time(last_op_id, k) * self.x[last_op_id, k] for k in compatible_machines),
+                name=f"makespan_{last_op_id}"
+            )
+
             # T[j] >= C[j] - d[j] (tardiness = completion_time - due_date)
             self.model.addConstr(
-                self.T[job_id] >= self.s[last_op] + gp.quicksum(self.processing_times[last_op][k] * self.x[last_op, k] for k in compatible_machines) - self.due_dates[job_id],
+                self.T[job_id] >= self.s[last_op_id] + gp.quicksum(self.data_handler.get_processing_time(last_op_id, k) * self.x[last_op_id, k] for k in compatible_machines) - self.due_dates[job_id],
                 name=f"tardiness_{job_id}"
             )
             
@@ -218,61 +192,66 @@ class MILP:
         # Solve the model
         self.model.optimize()
         
-        # Calculate makespan and TWT from solution
-        makespan = self.C_max.X if self.C_max.X is not None else None
-        total_weighted_tardiness = None
+        # Check if we have a valid solution
+        has_solution = (self.model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SOLUTION_LIMIT] 
+                       and self.C_max.X is not None)
         
-        if self.model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SOLUTION_LIMIT]:
-            # Calculate completion times and TWT
-            completion_times = {}
-            for job_id in range(self.num_jobs):
-                last_op = self.job_operations[job_id][-1]
-                job_id_check, op_index = self.get_operation_info(last_op)
-                compatible_machines = self.operation_machines[job_id][op_index]
-                
-                # Find assigned machine and completion time
-                for k in compatible_machines:
-                    if (last_op, k) in self.x and self.x[last_op, k].X > 0.5:
-                        completion_time = self.s[last_op].X + self.processing_times[last_op][k]
-                        completion_times[job_id] = completion_time
-                        break
-            
-            total_weighted_tardiness = self.data_handler.get_total_weighted_tardiness(completion_times)
+        # Initialize results
+        total_weighted_tardiness = None
+        schedule_result = {}
+        
+        if has_solution:
+            # Calculate TWT directly from job completion times
+            total_weighted_tardiness = self._calculate_twt()
+            # Extract machine schedule
+            schedule_result = self._extract_machine_schedule()
         
         # Performance metrics
         performance = {
             "status": self._get_status_string(self.model.status),
             "objective": self.model.objVal if self.model.objVal is not None else None,
             "solve_time": self.model.Runtime,
-            "makespan": makespan,
+            "makespan": self.C_max.X if has_solution else None,
             "total_weighted_tardiness": total_weighted_tardiness
         }
-        
-        # Schedule results
-        schedule_result = {}
-        
-        # Extract schedule if we have a solution (optimal or feasible)
-        if self.model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SOLUTION_LIMIT] and self.C_max.X is not None:
-            # Extract machine schedule
-            for i in range(self.num_operations):
-                assigned_machine = None
-                for k in range(self.num_machines):
-                    if (i, k) in self.x and self.x[i, k].X > 0.5:
-                        assigned_machine = k
-                        break
-                if assigned_machine is not None:
-                    if assigned_machine not in schedule_result:
-                        schedule_result[assigned_machine] = []
-                    schedule_result[assigned_machine].append((i, self.s[i].X))
-            
-            # Sort operations by start time for each machine
-            for machine_id in schedule_result:
-                schedule_result[machine_id].sort(key=lambda x: x[1])
         
         return {
             "performance": performance,
             "schedule_result": schedule_result
         }
+    
+    def _calculate_twt(self):
+        """Calculate total weighted tardiness directly from tardiness variables."""
+        total_twt = 0
+        for job_id in range(self.num_jobs):
+            tardiness = self.T[job_id].X
+            if tardiness is not None:
+                weight = self.data_handler.get_job_weight(job_id)
+                total_twt += weight * tardiness
+        
+        return total_twt
+    
+    def _extract_machine_schedule(self):
+        """Extract machine schedule from solution."""
+        schedule_result = {}
+        
+        # Extract machine schedule
+        for i in range(self.num_operations):
+            assigned_machine = None
+            for k in range(self.num_machines):
+                if (i, k) in self.x and self.x[i, k].X > 0.5:
+                    assigned_machine = k
+                    break
+            if assigned_machine is not None:
+                if assigned_machine not in schedule_result:
+                    schedule_result[assigned_machine] = []
+                schedule_result[assigned_machine].append((i, self.s[i].X))
+        
+        # Sort operations by start time for each machine
+        for machine_id in schedule_result:
+            schedule_result[machine_id].sort(key=lambda x: x[1])
+        
+        return schedule_result
     
     def _get_status_string(self, status: int) -> str:
         """Convert Gurobi status to readable string."""

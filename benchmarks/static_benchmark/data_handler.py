@@ -86,8 +86,6 @@ class FlexibleJobShopDataHandler:
             for machine_id in operation.compatible_machines:
                 self.processing_time_matrix[operation.operation_id, machine_id] = operation.get_processing_time(machine_id)
         
-        # Machine availability matrix (machines x time_slots)
-        self.machine_availability_matrix = np.zeros((self.num_machines, 1), dtype=int)
     
     # ===== PUBLIC INTERFACE METHODS =====
     
@@ -129,10 +127,6 @@ class FlexibleJobShopDataHandler:
         
         return self.processing_time_matrix[operation_id, machine_id]
     
-    def get_total_processing_time(self) -> int:
-        """Get total processing time for all operations."""
-        return sum(op.min_processing_time for op in self.operations)
-    
     def get_machine_load(self, machine_id: int) -> int:
         """Get total processing time assigned to a specific machine."""
         if machine_id < 0 or machine_id >= self.num_machines:
@@ -144,21 +138,24 @@ class FlexibleJobShopDataHandler:
                 total_load += operation.get_processing_time(machine_id)
         return total_load
     
-    def get_job_operations_list(self) -> List[List[int]]:
-        """Get list of operation IDs for each job."""
+    def get_operations_each_jobs(self) -> List[List[int]]:
+        """Get list of operation_id for each job."""
         return [[op.operation_id for op in job.operations] for job in self.jobs]
     
-    def get_operation_machines_list(self) -> List[List[List[int]]]:
-        """Get list of compatible machines for each operation in each job."""
+    def get_compatible_machines_each_jobs(self) -> List[List[List[int]]]:
+        """Get list of compatible machine_id for each operation in each job."""
         return [[op.compatible_machines for op in job.operations] for job in self.jobs]
     
     def get_operation_info(self, operation_id: int) -> Tuple[int, int]:
-        """Get job_id and operation_index for a given operation_id."""
-        for job_id, job in enumerate(self.jobs):
-            for op_idx, operation in enumerate(job.operations):
-                if operation.operation_id == operation_id:
-                    return job_id, op_idx
-        raise ValueError(f"Operation {operation_id} not found")
+        """Get job_id and operation position for a given operation_id."""
+        # utilize job_operation_matrix to get job_id and operation position
+        job_indices = np.where(self.job_operation_matrix == operation_id)[0]
+        if len(job_indices) == 0:
+            raise ValueError(f"Operation {operation_id} not found")
+        
+        job_id = job_indices[0]
+        operation_position = np.where(self.job_operation_matrix[job_id] == operation_id)[0][0]
+        return job_id, operation_position
     
     def get_job_due_date(self, job_id: int) -> int:
         """Get due date for a specific job."""
@@ -172,11 +169,11 @@ class FlexibleJobShopDataHandler:
             raise ValueError(f"Invalid job_id: {job_id}")
         return self.jobs[job_id].weight
     
-    def get_job_due_dates(self) -> List[int]:
+    def get_jobs_due_date(self) -> List[int]:
         """Get list of due dates for all jobs."""
         return [job.due_date for job in self.jobs]
     
-    def get_job_weights(self) -> List[int]:
+    def get_jobs_weight(self) -> List[int]:
         """Get list of weights for all jobs."""
         return [job.weight for job in self.jobs]
     
@@ -199,14 +196,13 @@ class FlexibleJobShopDataHandler:
     
     def get_statistics(self) -> Dict:
         """Get comprehensive statistics about the problem instance."""
-        due_dates = self.get_job_due_dates()
-        weights = self.get_job_weights()
+        due_dates = self.get_jobs_due_date()
+        weights = self.get_jobs_weight()
         
         stats = {
             "num_jobs": self.num_jobs,
             "num_machines": self.num_machines,
             "num_operations": self.num_operations,
-            "total_processing_time": self.get_total_processing_time(),
             "avg_operations_per_job": self.num_operations / self.num_jobs,
             "avg_processing_time": sum(op.min_processing_time for op in self.operations) / self.num_operations,
             "machine_loads": {f"machine_{i}": self.get_machine_load(i) for i in range(self.num_machines)},
@@ -274,8 +270,3 @@ def generate_multiple_simulations(
             print(f"Error generating simulation {i+1}: {e}")
     
     return simulations
-
-
-def compare_datasets(datasets: Dict[str, FlexibleJobShopDataHandler]) -> Dict:
-    """Compare multiple datasets and return statistics."""
-    return {name: handler.get_statistics() for name, handler in datasets.items()}

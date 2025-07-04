@@ -205,7 +205,7 @@ class FlatRLEnv(gym.Env):
             self.current_makespan = max(self.current_makespan, self.current_time)
         else:
             job_state['current_op'] = op_idx + 1
-
+    
     def step(self, action: int) -> Tuple[torch.Tensor, float, bool, Dict[str, Any]]:
         """
         Take a step in the environment.

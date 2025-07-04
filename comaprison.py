@@ -19,14 +19,14 @@ os.environ["WANDB_DIR"] = training_process_dir
 def main():
     # 1. Generate a synthetic problem instance
     data_params = {
-        'num_jobs': 5,
+        'num_jobs': 10,
         'num_machines': 4,
         'operation_lb': 3,
         'operation_ub': 5,
-        'processing_time_lb': 1,
+        'processing_time_lb': 5,
         'processing_time_ub': 10,
         'compatible_machines_lb': 1,
-        'compatible_machines_ub': 4,
+        'compatible_machines_ub': 3,
         'seed': 42
     }
     data_handler = FlexibleJobShopDataHandler(data_source=data_params, data_type="simulation")

@@ -26,13 +26,19 @@ class FlatRLTrainer:
     def __init__(self, 
                  env: FlatRLEnv,
                  hidden_dim: int = 128,
-                 lr: float = 3e-4,
+                 pi_lr: float = 3e-4,
+                 v_lr: float = 1e-3,
                  gamma: float = 0.99,
-                 gae_lambda: float = 0.95,
+                 gae_lambda: float = 0.97,
                  clip_ratio: float = 0.2,
                  entropy_coeff: float = 1e-3,
                  value_coeff: float = 0.5,
                  max_grad_norm: float = 0.5,
+                 target_kl: float = 0.01,
+                 train_pi_iters: int = 80,
+                 train_v_iters: int = 80,
+                 steps_per_epoch: int = 4000,
+                 epochs: int = 50,
                  device: str = 'auto',
                  model_save_dir: str = 'result/flat_rl/model'):
         """
@@ -41,18 +47,33 @@ class FlatRLTrainer:
         Args:
             env: The environment to train on
             hidden_dim: Hidden layer dimension for networks
-            lr: Learning rate
+            pi_lr: Policy learning rate
+            v_lr: Value function learning rate
             gamma: Discount factor
             gae_lambda: GAE lambda parameter
             clip_ratio: PPO clip ratio
             entropy_coeff: Entropy coefficient for exploration
             value_coeff: Value loss coefficient
             max_grad_norm: Maximum gradient norm for clipping
+            target_kl: Early stopping KL threshold
+            train_pi_iters: Policy update iterations per epoch
+            train_v_iters: Value update iterations per epoch
+            steps_per_epoch
+                Number of environment interaction steps (timesteps) to collect per training epoch. 
+                This controls how much experience is gathered before each round of policy/value updates.
+            epochs
+                Total number of training epochs to run. Each epoch consists of collecting `steps_per_epoch` steps,
+                followed by policy and value network updates. The total training steps will be `steps_per_epoch * epochs`.
             device: Device to run on ('auto', 'cpu', 'cuda')
             model_save_dir: Directory to save models
         """
         self.env = env
         self.model_save_dir = model_save_dir
+        self.steps_per_epoch = steps_per_epoch
+        self.epochs = epochs
+        self.train_pi_iters = train_pi_iters
+        self.train_v_iters = train_v_iters
+        self.target_kl = target_kl
         
         # Create save directory
         os.makedirs(model_save_dir, exist_ok=True)
@@ -68,7 +89,8 @@ class FlatRLTrainer:
             obs_shape=obs_shape,
             action_dim=action_dim,
             hidden_dim=hidden_dim,
-            lr=lr,
+            pi_lr=pi_lr,
+            v_lr=v_lr,
             gamma=gamma,
             gae_lambda=gae_lambda,
             clip_ratio=clip_ratio,
@@ -92,98 +114,87 @@ class FlatRLTrainer:
         print(f"Action space: {action_dim} actions")
         print(f"Observation space: {obs_shape}")
     
-    def train(self, 
-              num_episodes: int = 500, 
-              buffer_size: int = 1000, 
-              update_frequency: int = 10,
-              eval_frequency: int = 50,
-              save_frequency: int = 100) -> Dict:
+    def train(self) -> Dict:
         """
-        Train the agent.
-        
-        Args:
-            num_episodes: Number of episodes to train
-            buffer_size: Size of the replay buffer
-            update_frequency: How often to update the agent
-            eval_frequency: How often to evaluate the agent
-            save_frequency: How often to save the model
-            
+        Train the agent using epoch-based PPO (Spinning Up style).
         Returns:
             Dictionary containing training results
         """
-        # Initialize buffer
         obs_dim = self.env.obs_len
         obs_shape = (obs_dim,)
         action_space = cast(spaces.Discrete, self.env.action_space)
         action_dim = action_space.n
-        buffer = PPOBuffer(buffer_size, obs_shape, action_dim, self.agent.device)
-        
-        # Initialize wandb
+        buffer = PPOBuffer(self.steps_per_epoch, obs_shape, action_dim, self.agent.device)
         wandb.init(
             project="Flexible-Job-Shop-RL",
             config={
-                "num_episodes": num_episodes,
-                "buffer_size": buffer_size,
-                "update_frequency": update_frequency,
-                "eval_frequency": eval_frequency,
-                "save_frequency": save_frequency,
+                "steps_per_epoch": self.steps_per_epoch,
+                "epochs": self.epochs,
                 "hidden_dim": self.agent.policy.backbone[0].out_features,
-                "lr": self.agent.policy_optimizer.param_groups[0]['lr'],
+                "pi_lr": self.agent.pi_lr,
+                "v_lr": self.agent.v_lr,
                 "gamma": self.agent.gamma,
                 "gae_lambda": self.agent.gae_lambda,
                 "clip_ratio": self.agent.clip_ratio,
                 "entropy_coeff": self.agent.entropy_coeff,
                 "value_coeff": self.agent.value_coeff,
                 "max_grad_norm": self.agent.max_grad_norm,
+                "target_kl": self.target_kl,
+                "train_pi_iters": self.train_pi_iters,
+                "train_v_iters": self.train_v_iters,
             }
         )
-        
         start_time = time.time()
-        
-        # Training loop with progress bar
-        pbar = tqdm(range(num_episodes), desc="Training Progress")
-        for episode in pbar:
+        pbar = tqdm(range(self.epochs), desc="Training Progress")
+        for epoch in pbar:
             obs = self.env.reset()
-            total_reward = 0
-            step_count = 0
-            while True:
+            ep_reward, ep_makespan, ep_twt = 0, 0, 0
+            ep_len = 0
+            for t in range(self.steps_per_epoch):
                 action_mask = self.env.get_action_mask()
                 if not action_mask.any():
                     break
                 action, log_prob, value = self.agent.get_action(obs, action_mask)
                 next_obs, reward, done, info = self.env.step(action)
                 buffer.add(obs, action, reward, value, log_prob, action_mask, done)
-                total_reward += reward
+                ep_reward += reward
                 obs = next_obs
-                step_count += 1
-                if done:
-                    break
-            # Only log necessary episode stats to wandb
-            makespan = info.get('makespan', 0)
-            twt = info.get('twt', 0)
-            alpha = getattr(self.env, 'alpha', 0.5)
-            objective = alpha * makespan + (1 - alpha) * twt
+                ep_len += 1
+                if done or (t == self.steps_per_epoch - 1):
+                    makespan = info.get('makespan', 0)
+                    twt = info.get('twt', 0)
+                    alpha = getattr(self.env, 'alpha', 0.5)
+                    objective = alpha * makespan + (1 - alpha) * twt
+                    self.training_history['episode_rewards'].append(ep_reward)
+                    self.training_history['episode_makespans'].append(makespan)
+                    self.training_history['episode_twts'].append(twt)
+                    wandb.log({
+                        "epoch": epoch,
+                        "reward": ep_reward,
+                        "makespan": makespan,
+                        "twt": twt,
+                        "objective": objective,
+                        "ep_len": ep_len
+                    })
+                    obs = self.env.reset()
+                    ep_reward, ep_makespan, ep_twt, ep_len = 0, 0, 0, 0
+            # PPO update
+            stats = self.agent.update(
+                buffer,
+                train_pi_iters=self.train_pi_iters,
+                train_v_iters=self.train_v_iters,
+                target_kl=self.target_kl
+            )
+            self.training_history['training_stats'].append(stats)
+            buffer.clear()
             wandb.log({
-                "episode": episode,
-                "reward": total_reward,
-                "makespan": makespan,
-                "twt": twt,
-                "objective": objective
+                "policy_loss": stats["policy_loss"],
+                "value_loss": stats["value_loss"],
+                "entropy_loss": stats["entropy_loss"],
+                "total_loss": stats["total_loss"],
+                "clip_fraction": stats["clip_fraction"],
+                "kl": stats.get("kl", 0.0)
             })
-            self.training_history['episode_rewards'].append(total_reward)
-            self.training_history['episode_makespans'].append(makespan)
-            self.training_history['episode_twts'].append(twt)
-            if buffer.size >= update_frequency and episode % update_frequency == 0:
-                stats = self.agent.update(buffer, num_epochs=4)
-                self.training_history['training_stats'].append(stats)
-                buffer.clear()
-                wandb.log({
-                    "policy_loss": stats["policy_loss"],
-                    "value_loss": stats["value_loss"],
-                    "entropy_loss": stats["entropy_loss"],
-                    "total_loss": stats["total_loss"],
-                    "clip_fraction": stats["clip_fraction"]
-                })
         training_time = time.time() - start_time
         pbar.close()
         self.save_model("final_model.pth")

@@ -12,22 +12,22 @@ os.environ["WANDB_DIR"] = training_process_dir
 
 def main():
     # Example: generate a synthetic problem instance with correct params
-    data_params = {
-        'num_jobs': 5,
+    simulation_params = {
+        'num_jobs': 8, 
         'num_machines': 4,
-        'operation_lb': 3,
-        'operation_ub': 5,
-        'processing_time_lb': 1,
-        'processing_time_ub': 10,
-        'compatible_machines_lb': 1,
-        'compatible_machines_ub': 4,
-        'seed': 42
+        'operation_lb': 2,
+        'operation_ub': 4,
+        'processing_time_lb': 3,
+        'processing_time_ub': 8,   
+        'compatible_machines_lb': 2,
+        'compatible_machines_ub': 3,
+        'seed': 42,
     }
-    data_handler = FlexibleJobShopDataHandler(data_source=data_params, data_type="simulation")
-    env = FlatRLEnv(data_handler)
+    data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
+    env = FlatRLEnv(data_handler, alpha=0.5)
     trainer = FlatRLTrainer(env, model_save_dir=model_dir)
     print("Starting training for 100 episodes...")
-    results = trainer.train(num_episodes=2000)
+    results = trainer.train()
     print("Training complete.")
     print(f"Final average reward: {sum(results['episode_rewards'][-10:]) / 10:.2f}")
     print(f"Final average makespan: {sum(results['episode_makespans'][-10:]) / 10:.2f}")

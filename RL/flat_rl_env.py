@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import gym
 from gym import spaces
 import heapq
+from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 
 class FlatRLEnv(gym.Env):
     """
@@ -22,31 +23,31 @@ class FlatRLEnv(gym.Env):
     - Objectives: minimize makespan and total weighted tardiness
     """
     
-    def __init__(self, data_handler, alpha: float = 0.5, max_jobs: Optional[int] = None, max_machines: Optional[int] = None):
+    def __init__(self, data_handler, alpha: float, max_jobs: Optional[int] = None, max_machines: Optional[int] = None):
         """
         Initialize the environment.
         
         Args:
             data_handler: FlexibleJobShopDataHandler instance
-            alpha: Weight for makespan in reward (default 0.5)
+            alpha: Weight for TWT in reward
             max_jobs: Maximum jobs for padding (default: num_jobs)
             max_machines: Maximum machines for padding (default: num_machines)
         """
         super().__init__()
         
-        self.data_handler = data_handler
-        self.jobs = data_handler.jobs
-        self.operations = data_handler.operations
-        self.num_jobs = data_handler.num_jobs
-        self.num_machines = data_handler.num_machines
-        self.num_operations = data_handler.num_operations
+        self.data_handler : FlexibleJobShopDataHandler = data_handler 
+        self.jobs = self.data_handler.jobs
+        self.operations = self.data_handler.operations
+        self.num_jobs = self.data_handler.num_jobs
+        self.num_machines = self.data_handler.num_machines
+        self.num_operations = self.data_handler.num_operations
         
         # Extract due dates and weights
-        self.due_dates = data_handler.get_job_due_dates()
-        self.weights = data_handler.get_job_weights()
+        self.due_dates = self.data_handler.get_jobs_due_date()
+        self.weights = self.data_handler.get_jobs_weight()
         
-        self.alpha = alpha
-        self.beta = 1 - alpha
+        self.alpha = alpha  # Weight for TWT
+        self.beta = 1 - alpha  # Weight for makespan
         
         # Set padding dimensions
         self.max_jobs = max_jobs if max_jobs is not None else self.num_jobs
@@ -124,23 +125,33 @@ class FlatRLEnv(gym.Env):
         proc_times = np.zeros((self.num_jobs, self.num_machines), dtype=np.float32)
         # 2. Machine available time: [num_jobs, num_machines]
         #    For each job and machine, earliest time the machine is available for the job's next op (normalized), -1 if not compatible or job done
-        machine_avail_time = np.full((self.num_jobs, self.num_machines), -1.0, dtype=np.float32)
+        machine_avail_time = np.zeros((self.num_jobs, self.num_machines), dtype=np.float32)
         max_avail_time = 1.0
         for job_id, job in enumerate(self.jobs):
             job_state = self.job_states[job_id]
             op_idx = job_state['current_op']
-            if op_idx < len(job.operations):
+            if op_idx >= len(job.operations):
+                # Job is done: set all machines to 0
+                proc_times[job_id, :] = 0
+                machine_avail_time[job_id, :] = 0
+            else:
                 op = job.operations[op_idx]
-                for machine_id in op.compatible_machines:
-                    proc_times[job_id, machine_id] = op.get_processing_time(machine_id) / self.avg_processing_time
-                    avail_time = self.machine_states[machine_id]['finish_time']
-                    if avail_time is None:
-                        avail_time = self.current_time
-                    machine_avail_time[job_id, machine_id] = avail_time
-                    if avail_time > max_avail_time:
-                        max_avail_time = avail_time
-        # Normalize machine available times (except -1)
-        norm_machine_avail_time = np.where(machine_avail_time >= 0, machine_avail_time / max_avail_time, -1.0)
+                for machine_id in range(self.num_machines):
+                    if machine_id not in op.compatible_machines:
+                        # Incompatible machine: set to -1
+                        proc_times[job_id, machine_id] = -1
+                        machine_avail_time[job_id, machine_id] = -1
+                    else:
+                        # Compatible machine: set normalized values
+                        proc_times[job_id, machine_id] = op.get_processing_time(machine_id) / self.avg_processing_time
+                        avail_time = self.machine_states[machine_id]['finish_time']
+                        if avail_time is None:
+                            avail_time = self.current_time
+                        machine_avail_time[job_id, machine_id] = avail_time
+                        if avail_time > max_avail_time:
+                            max_avail_time = avail_time
+        # Normalize machine available times (except -1 and 0)
+        norm_machine_avail_time = np.where(machine_avail_time > 0, machine_avail_time / max_avail_time, machine_avail_time)
         # 3. Job remaining time: [num_jobs] (normalized)
         job_remain = np.array([
             js['remaining_time'] / self.avg_processing_time for js in self.job_states
@@ -273,7 +284,7 @@ class FlatRLEnv(gym.Env):
         # 5. Check if all jobs are finished
         done = all(js['completed_ops'] == len(self.jobs[jid].operations) for jid, js in enumerate(self.job_states))
         if done:
-            objective = self.alpha * self.current_makespan + self.beta * self.current_twt
+            objective = self.beta * self.current_makespan + self.alpha * self.current_twt
             reward = 0.0
             if self.last_objective is not None:
                 reward = self.last_objective - objective

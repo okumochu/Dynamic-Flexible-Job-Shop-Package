@@ -10,10 +10,52 @@ class PolicyShowcaser:
         self.env = env
         # Find the model file (assume final_model.pth)
         model_path = os.path.join(model_dir, "final_model.pth")
-        # Load agent with correct obs/action dims
-        obs_shape = env.observation_space.shape
-        action_dim = env.action_space.n
-        self.agent = PPOWorker(obs_shape, action_dim)
+        
+        # Try to load configuration from saved model
+        try:
+            config = PPOWorker.get_saved_config(model_path)
+            print(f"Loaded configuration from saved model:")
+            for key, value in config.items():
+                print(f"  {key}: {value}")
+            
+            # Create agent with saved configuration
+            self.agent = PPOWorker(
+                obs_shape=config['obs_shape'],
+                action_dim=config['action_dim'],
+                hidden_dim=config['hidden_dim'],
+                pi_lr=config.get('pi_lr', 3e-4),
+                v_lr=config.get('v_lr', 3e-4),
+                gamma=config['gamma'],
+                gae_lambda=config['gae_lambda'],
+                clip_ratio=config['clip_ratio'],
+                entropy_coeff=config['entropy_coeff'],
+                value_coeff=config['value_coeff'],
+                max_grad_norm=config['max_grad_norm'],
+                device=config['device']
+            )
+        except Exception as e:
+            print(f"Could not load configuration from model: {e}")
+            print("Falling back to environment-based configuration...")
+            # Fallback to environment-based configuration
+            obs_shape = env.observation_space.shape
+            action_dim = env.action_space.n
+            self.agent = PPOWorker(
+                obs_shape=obs_shape,
+                action_dim=action_dim,
+                hidden_dim=128,  # Default hidden dimension
+                pi_lr=3e-4,  # Default policy learning rate
+                v_lr=3e-4,   # Default value learning rate
+                gamma=0.99,  # Default gamma
+                gae_lambda=0.95,  # Default GAE lambda
+                clip_ratio=0.2,  # Default clip ratio
+                entropy_coeff=0.01,  # Default entropy coefficient
+                value_coeff=0.5,  # Default value coefficient
+                max_grad_norm=0.5,  # Default max gradient norm
+                device='auto'  # Auto-detect device
+            )
+        
+        # Load the trained model
+        self.agent.load(model_path)
 
     def showcase(self, render_gantt=True, gantt_save_path=None):
         obs = self.env.reset()

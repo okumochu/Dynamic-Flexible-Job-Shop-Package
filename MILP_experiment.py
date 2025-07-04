@@ -130,7 +130,7 @@ def run_simulation_experiment():
         'seed': 42,
     }
     
-    run_experiment(simulation_params, "simulation", time_limit=3600, twt_weight=0)
+    run_experiment(simulation_params, "simulation", time_limit=3600, twt_weight=0.5)
 
 
 def main():

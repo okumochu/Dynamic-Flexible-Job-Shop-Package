@@ -13,14 +13,15 @@ class PPOWorker:
     def __init__(self, 
                  obs_shape,
                  action_dim,
-                 hidden_dim=256,
-                 lr=3e-4,
-                 gamma=0.99,
-                 gae_lambda=0.95,
-                 clip_ratio=0.2,
-                 entropy_coeff=1e-3,
-                 value_coeff=0.5,
-                 max_grad_norm=0.5,
+                 hidden_dim,
+                 pi_lr,
+                 v_lr,
+                 gamma,
+                 gae_lambda,
+                 clip_ratio,
+                 entropy_coeff,
+                 value_coeff,
+                 max_grad_norm,
                  device='auto'):
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -36,14 +37,22 @@ class PPOWorker:
         self.max_grad_norm = max_grad_norm
         self.policy = PolicyNetwork(obs_shape, action_dim, hidden_dim).to(self.device)
         self.value = ValueNetwork(obs_shape, hidden_dim).to(self.device)
-        self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=lr)
-        self.value_optimizer = optim.Adam(self.value.parameters(), lr=lr)
+        self.pi_lr = pi_lr
+        self.v_lr = v_lr
+        self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=pi_lr)
+        self.value_optimizer = optim.Adam(self.value.parameters(), lr=v_lr)
+        
+        # Store configuration parameters for saving
+        self.obs_shape = obs_shape
+        self.hidden_dim = hidden_dim
+        
         self.training_stats = {
             'policy_loss': [],
             'value_loss': [],
             'entropy_loss': [],
             'total_loss': [],
-            'clip_fraction': []
+            'clip_fraction': [],
+            'kl': []
         }
     def get_action(self, obs: torch.Tensor, action_mask: torch.Tensor):
         with torch.no_grad():
@@ -74,14 +83,24 @@ class PPOWorker:
             advantages[t] = gae
         returns = advantages + values
         return returns
-    def update(self, buffer: PPOBuffer, num_epochs: int = 4):
+    def update(self, buffer: PPOBuffer, train_pi_iters: int = 4, train_v_iters: int = 4, target_kl: float = 0.0):
+        """
+        Update PPO agent using buffer.
+        Args:
+            buffer: PPOBuffer with experience
+            train_pi_iters: Number of policy update iterations
+            train_v_iters: Number of value update iterations
+            target_kl: Early stopping KL threshold (0.0 disables early stopping)
+        Returns:
+            stats: dict with losses, clip_fraction, kl
+        """
         batch = buffer.get_batch()
         returns = self.compute_gae_returns(batch['rewards'], batch['values'], batch['dones'])
         advantages = returns - batch['values']
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        for epoch in range(num_epochs):
+        # Policy update
+        for i in range(train_pi_iters):
             action_logits = self.policy(batch['observations'])
-            values = self.value(batch['observations'])
             masked_logits = action_logits.clone()
             masked_logits[~batch['action_masks']] = float('-inf')
             dist = Categorical(logits=masked_logits)
@@ -90,32 +109,39 @@ class PPOWorker:
             surr1 = ratio * advantages
             surr2 = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = F.mse_loss(values.squeeze(), returns)
             entropy_loss = -dist.entropy().mean()
-            total_loss = (policy_loss + 
-                         self.value_coeff * value_loss + 
-                         self.entropy_coeff * entropy_loss)
             self.policy_optimizer.zero_grad()
-            policy_loss.backward()
+            (policy_loss + self.entropy_coeff * entropy_loss).backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.policy_optimizer.step()
+            # KL divergence for early stopping
+            with torch.no_grad():
+                approx_kl = (batch['log_probs'] - new_log_probs).mean().item()
+            if target_kl > 0.0 and approx_kl > 1.5 * target_kl:
+                print(f"Early stopping at iter {i} due to reaching max kl: {approx_kl:.4f}")
+                break
+        # Value function update
+        for _ in range(train_v_iters):
+            values = self.value(batch['observations'])
+            value_loss = F.mse_loss(values.squeeze(), returns)
             self.value_optimizer.zero_grad()
             value_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.value.parameters(), self.max_grad_norm)
             self.value_optimizer.step()
-            clip_fraction = (abs(ratio - 1) > self.clip_ratio).float().mean().item()
-            self.training_stats['policy_loss'].append(policy_loss.item())
-            self.training_stats['value_loss'].append(value_loss.item())
-            self.training_stats['entropy_loss'].append(entropy_loss.item())
-            self.training_stats['total_loss'].append(total_loss.item())
-            self.training_stats['clip_fraction'].append(clip_fraction)
+        # Logging
+        clip_mask = abs(ratio - 1) > self.clip_ratio
+        clip_fraction = torch.as_tensor(clip_mask, dtype=torch.float32).mean().item()
         stats = {
-            'policy_loss': float(np.mean(self.training_stats['policy_loss'][-num_epochs:])),
-            'value_loss': float(np.mean(self.training_stats['value_loss'][-num_epochs:])),
-            'entropy_loss': float(np.mean(self.training_stats['entropy_loss'][-num_epochs:])),
-            'total_loss': float(np.mean(self.training_stats['total_loss'][-num_epochs:])),
-            'clip_fraction': float(np.mean(self.training_stats['clip_fraction'][-num_epochs:]))
+            'policy_loss': float(policy_loss.item()),
+            'value_loss': float(value_loss.item()),
+            'entropy_loss': float(entropy_loss.item()),
+            'total_loss': float(policy_loss.item() + self.value_coeff * value_loss.item() + self.entropy_coeff * entropy_loss.item()),
+            'clip_fraction': float(clip_fraction),
+            'kl': float(approx_kl)
         }
+        for k in stats:
+            if k in self.training_stats:
+                self.training_stats[k].append(stats[k])
         return stats
     def save(self, path: str):
         torch.save({
@@ -123,7 +149,20 @@ class PPOWorker:
             'value_state_dict': self.value.state_dict(),
             'policy_optimizer_state_dict': self.policy_optimizer.state_dict(),
             'value_optimizer_state_dict': self.value_optimizer.state_dict(),
-            'training_stats': self.training_stats
+            'training_stats': self.training_stats,
+            # Save configuration parameters
+            'obs_shape': self.obs_shape,
+            'action_dim': self.action_dim,
+            'hidden_dim': self.hidden_dim,
+            'pi_lr': self.pi_lr,
+            'v_lr': self.v_lr,
+            'gamma': self.gamma,
+            'gae_lambda': self.gae_lambda,
+            'clip_ratio': self.clip_ratio,
+            'entropy_coeff': self.entropy_coeff,
+            'value_coeff': self.value_coeff,
+            'max_grad_norm': self.max_grad_norm,
+            'device': str(self.device)
         }, path)
     def load(self, path: str):
         checkpoint = torch.load(path, map_location=self.device)
@@ -151,4 +190,26 @@ class PPOWorker:
             if (~action_mask).all():
                 raise RuntimeError("All actions are masked in get_deterministic_action. This should not happen.")
             action = torch.argmax(masked_logits).item()
-            return int(action) 
+            return int(action)
+    
+    @staticmethod
+    def get_saved_config(path: str):
+        """Get the configuration parameters from a saved model."""
+        checkpoint = torch.load(path, map_location='cpu')
+        if 'obs_shape' in checkpoint:
+            return {
+                'obs_shape': checkpoint['obs_shape'],
+                'action_dim': checkpoint['action_dim'],
+                'hidden_dim': checkpoint['hidden_dim'],
+                'pi_lr': checkpoint['pi_lr'],
+                'v_lr': checkpoint['v_lr'],
+                'gamma': checkpoint['gamma'],
+                'gae_lambda': checkpoint['gae_lambda'],
+                'clip_ratio': checkpoint['clip_ratio'],
+                'entropy_coeff': checkpoint['entropy_coeff'],
+                'value_coeff': checkpoint['value_coeff'],
+                'max_grad_norm': checkpoint['max_grad_norm'],
+                'device': checkpoint['device']
+            }
+        else:
+            raise ValueError("This checkpoint does not contain configuration parameters. It was likely saved with an older version.") 

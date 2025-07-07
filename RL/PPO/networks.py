@@ -62,4 +62,4 @@ class ValueNetwork(nn.Module):
         # obs: (batch_size, input_dim)
         features = self.backbone(obs)
         value = self.value(features)
-        return value 
+        return value

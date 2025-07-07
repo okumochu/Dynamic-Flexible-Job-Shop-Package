@@ -6,10 +6,11 @@ Implements OpenAI Gym API for multi-objective optimization (Makespan + TWT)
 import torch
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import heapq
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from RL.flat_rl_state import FlatRLState
 
 class FlatRLEnv(gym.Env):
     """
@@ -35,189 +36,49 @@ class FlatRLEnv(gym.Env):
         """
         super().__init__()
         
-        self.data_handler : FlexibleJobShopDataHandler = data_handler 
-        self.jobs = self.data_handler.jobs
-        self.operations = self.data_handler.operations
-        self.num_jobs = self.data_handler.num_jobs
-        self.num_machines = self.data_handler.num_machines
-        self.num_operations = self.data_handler.num_operations
+        # Initialize state manager
+        self.state = FlatRLState(data_handler, max_jobs, max_machines)
+        
+        # Access state properties through state manager
+        self.data_handler = data_handler
+        self.jobs = self.state.jobs
+        self.operations = self.state.operations
+        self.num_jobs = self.state.num_jobs
+        self.num_machines = self.state.num_machines
+        self.num_operations = self.state.num_operations
         
         # Extract due dates and weights
-        self.due_dates = self.data_handler.get_jobs_due_date()
-        self.weights = self.data_handler.get_jobs_weight()
+        self.due_dates = self.state.due_dates
+        self.weights = self.state.weights
         
         self.alpha = alpha  # Weight for TWT
         self.beta = 1 - alpha  # Weight for makespan
         
         # Set padding dimensions
-        self.max_jobs = max_jobs if max_jobs is not None else self.num_jobs
-        self.max_machines = max_machines if max_machines is not None else self.num_machines
+        self.max_jobs = self.state.max_jobs
+        self.max_machines = self.state.max_machines
         
-        # Calculate global statistics for normalization
-        self._calculate_global_stats()
+        # Access state dimensions through state manager
+        self.action_dim = self.state.action_dim
+        self.obs_len = self.state.obs_len
         
         # Action space: num_jobs * num_machines
-        self.action_dim = self.num_jobs * self.num_machines
         self.action_space = spaces.Discrete(self.action_dim)
         
         # Observation: [proc_times (JxM), machine_avail_time (JxM), job_remain (J), job_weight (J), ops_left (J)]
-        self.obs_len = 2 * self.num_jobs * self.num_machines + 3 * self.num_jobs
         self.observation_space = spaces.Box(low=-1, high=1, shape=(self.obs_len,), dtype=np.float32)
         
         # Initialize state variables
-        self.reset()
-    
-    def _calculate_global_stats(self):
-        """Calculate global statistics for normalization."""
-        # Calculate total processing time and average
-        total_proc_time = 0
-        num_operations = 0
-        
-        for job in self.jobs:
-            for op in job.operations:
-                total_proc_time += sum(op.machine_processing_times.values())
-                num_operations += len(op.machine_processing_times)
-        
-        self.avg_processing_time = total_proc_time / num_operations if num_operations > 0 else 1.0
-        
-        # Calculate max weight for normalization
-        self.max_weight = max(self.weights) if self.weights else 1.0
-   
-    def reset(self) -> torch.Tensor:
-        """Reset the environment to initial state."""
-        # Initialize job states
-        self.job_states = []
-        for job_id, job in enumerate(self.jobs):
-            job_state = {
-                'completed_ops': 0,
-                'current_op': 0,
-                'remaining_time': sum(op.min_processing_time for op in job.operations),
-                'weight': self.weights[job_id],
-                'finish_time': None
-            }
-            self.job_states.append(job_state)
-        # Initialize machine states: only track finish_time (when machine is next available)
-        self.machine_states = []
-        for machine_id in range(self.num_machines):
-            machine_state = {
-                'finish_time': None  # None means available now
-            }
-            self.machine_states.append(machine_state)
-        # Initialize time and event queue
-        self.current_time = 0.0
-        # Initialize operation states
-        self.op_states = {}  # (job_id, op_idx) -> status
-        for job_id, job in enumerate(self.jobs):
-            for op_idx in range(len(job.operations)):
-                self.op_states[(job_id, op_idx)] = 0  # 0: not started, 1: finished
-        # Initialize makespan and TWT tracking
-        self.current_makespan = 0.0
-        self.current_twt = 0.0
         self.last_objective = None
-        # Track full operation schedule for Gantt
-        self.operation_schedules = []
-        return self._get_observation()
     
-    def _get_observation(self) -> torch.Tensor:
-        """Get the current observation tensor."""
-        # 1. Processing time: [num_jobs, num_machines]
-        #    For each job's next operation on each machine (normalized), 0 if not compatible or job done
-        proc_times = np.zeros((self.num_jobs, self.num_machines), dtype=np.float32)
-        # 2. Machine available time: [num_jobs, num_machines]
-        #    For each job and machine, earliest time the machine is available for the job's next op (normalized), -1 if not compatible or job done
-        machine_avail_time = np.zeros((self.num_jobs, self.num_machines), dtype=np.float32)
-        max_avail_time = 1.0
-        for job_id, job in enumerate(self.jobs):
-            job_state = self.job_states[job_id]
-            op_idx = job_state['current_op']
-            if op_idx >= len(job.operations):
-                # Job is done: set all machines to 0
-                proc_times[job_id, :] = 0
-                machine_avail_time[job_id, :] = 0
-            else:
-                op = job.operations[op_idx]
-                for machine_id in range(self.num_machines):
-                    if machine_id not in op.compatible_machines:
-                        # Incompatible machine: set to -1
-                        proc_times[job_id, machine_id] = -1
-                        machine_avail_time[job_id, machine_id] = -1
-                    else:
-                        # Compatible machine: set normalized values
-                        proc_times[job_id, machine_id] = op.get_processing_time(machine_id) / self.avg_processing_time
-                        avail_time = self.machine_states[machine_id]['finish_time']
-                        if avail_time is None:
-                            avail_time = self.current_time
-                        machine_avail_time[job_id, machine_id] = avail_time
-                        if avail_time > max_avail_time:
-                            max_avail_time = avail_time
-        # Normalize machine available times (except -1 and 0)
-        norm_machine_avail_time = np.where(machine_avail_time > 0, machine_avail_time / max_avail_time, machine_avail_time)
-        # 3. Job remaining time: [num_jobs] (normalized)
-        job_remain = np.array([
-            js['remaining_time'] / self.avg_processing_time for js in self.job_states
-        ], dtype=np.float32)
-        # 4. Job weight: [num_jobs] (normalized)
-        job_weight = np.array([
-            js['weight'] / self.max_weight for js in self.job_states
-        ], dtype=np.float32)
-        # 5. Operation status: [num_jobs] (number of operations left, normalized)
-        max_ops = max(len(job.operations) for job in self.jobs)
-        ops_left = np.array([
-            (len(self.jobs[jid].operations) - js['completed_ops']) / max_ops for jid, js in enumerate(self.job_states)
-        ], dtype=np.float32)
-        # Concatenate all state components into a flat vector
-        obs = np.concatenate([
-            proc_times.flatten(),
-            norm_machine_avail_time.flatten(),
-            job_remain,
-            job_weight,
-            ops_left
-        ])
-        return torch.tensor(obs, dtype=torch.float32)
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
+        """Reset the environment to initial state."""
+        self.state.reset()
+        self.last_objective = None
+        obs = self.state.get_observation()
+        return obs.numpy(), {}
     
-    def _get_action_mask(self) -> torch.Tensor:
-        """Get boolean mask for valid actions"""
-        mask = torch.zeros(self.action_dim, dtype=torch.bool)
-        for job_id in range(self.num_jobs):
-            job_state = self.job_states[job_id]
-            op_idx = job_state['current_op']
-            if op_idx >= len(self.jobs[job_id].operations):
-                continue  # No more ops
-            op = self.jobs[job_id].operations[op_idx]
-            for machine_id in op.compatible_machines:
-                idx = job_id * self.num_machines + machine_id
-                # Always allow scheduling: agent can always schedule on any compatible machine
-                mask[idx] = True
-        return mask
-
-    def _decode_action(self, action: int) -> Tuple[int, int]:
-        """Decode action index to (job_id, machine_id)."""
-        job_id = action // self.num_machines
-        machine_id = action % self.num_machines
-        return job_id, machine_id
-    
-    
-    def _complete_operation(self, job_id: int, op_idx: int, machine_id: int):
-        """Complete an operation and update states."""
-        # Update operation status
-        self.op_states[(job_id, op_idx)] = 1  # Finished
-        # No need to update machine idle/current_op/load
-        # Update job state
-        job_state = self.job_states[job_id]
-        op = self.jobs[job_id].operations[op_idx]
-        proc_time = op.get_processing_time(machine_id)
-        job_state['completed_ops'] += 1
-        job_state['remaining_time'] -= proc_time
-        # Check if job is finished
-        if job_state['completed_ops'] == len(self.jobs[job_id].operations):
-            job_state['finish_time'] = self.current_time
-            tardiness = max(0, self.current_time - getattr(self.jobs[job_id], 'due_date', 0))
-            self.current_twt += job_state['weight'] * tardiness
-            self.current_makespan = max(self.current_makespan, self.current_time)
-        else:
-            job_state['current_op'] = op_idx + 1
-    
-    def step(self, action: int) -> Tuple[torch.Tensor, float, bool, Dict[str, Any]]:
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
         Take a step in the environment.
         
@@ -227,98 +88,65 @@ class FlatRLEnv(gym.Env):
         Returns:
             observation: Current observation tensor
             reward: Reward for this step
-            done: Whether episode is finished
+            terminated: Whether episode is finished (natural)
+            truncated: Whether episode is truncated (never in this env)
             info: Additional information
         """
-        # 1. Check if there are any valid actions (i.e., at least one job with a next op and compatible machine)
-        action_mask = self.get_action_mask()
-        if not action_mask.any():
-            # No valid actions: episode done
-            done = True
-            reward = 0.0
-            info = {
-                'makespan': self.current_makespan,
-                'twt': self.current_twt,
-                'current_time': self.current_time,
-                'action_mask': action_mask
-            }
-            return self._get_observation(), reward, done, info
-        # 2. Decode action to (job_id, machine_id)
-        job_id, machine_id = self._decode_action(action)
-        op_idx = self.job_states[job_id]['current_op']
-        op = self.jobs[job_id].operations[op_idx]
-        # 3. Schedule the operation: update machine available time, job state, and operation status
-        #    The operation starts at the max of current time and machine available time
-        machine_ready = self.machine_states[machine_id]['finish_time']
-        if machine_ready is None:
-            machine_ready = self.current_time
-        start_time = max(self.current_time, machine_ready)
-        proc_time = op.get_processing_time(machine_id)
-        finish_time = start_time + proc_time
-        operation_id = op.operation_id
-        self.operation_schedules.append({
-            'operation_id': operation_id,
-            'job_id': job_id,
-            'op_idx': op_idx,
-            'machine_id': machine_id,
-            'start_time': start_time,
-            'finish_time': finish_time
-        })
-        # Update machine available time (finish_time)
-        self.machine_states[machine_id]['finish_time'] = finish_time
-        # Update operation status
-        self.op_states[(job_id, op_idx)] = 1  # Mark as finished
-        # Update job state
-        job_state = self.job_states[job_id]
-        job_state['completed_ops'] += 1
-        job_state['remaining_time'] -= proc_time
-        if job_state['completed_ops'] == len(self.jobs[job_id].operations):
-            job_state['finish_time'] = finish_time
-            tardiness = max(0, finish_time - getattr(self.jobs[job_id], 'due_date', 0))
-            self.current_twt += job_state['weight'] * tardiness
-            self.current_makespan = max(self.current_makespan, finish_time)
+        # 1. Check if the environment is done
+        terminated = False
+        if self.state.is_done():
+            terminated = True
         else:
-            job_state['current_op'] = op_idx + 1
-        # 4. Advance current time to the finish time of this operation
-        self.current_time = finish_time
-        # 5. Check if all jobs are finished
-        done = all(js['completed_ops'] == len(self.jobs[jid].operations) for jid, js in enumerate(self.job_states))
-        if done:
-            objective = self.beta * self.current_makespan + self.alpha * self.current_twt
-            reward = 0.0
+            # 2. Decode action to (job_id, machine_id)
+            job_id, machine_id = self.state.decode_action(action)
+            op_idx = self.state.job_states[job_id]['current_op']
+            op = self.jobs[job_id].operations[op_idx]
+            
+            # 3. Schedule the operation: update machine available time, job state, and operation status
+            #    The operation starts at the max of current time and machine available time
+            machine_ready = self.state.machine_states[machine_id]['finish_time']
+            if machine_ready is None:
+                machine_ready = self.state.current_time
+            start_time = max(self.state.current_time, machine_ready)
+            proc_time = op.get_processing_time(machine_id)
+            finish_time = start_time + proc_time
+            
+            # Schedule the operation using state manager
+            self.state.schedule_operation(job_id, machine_id, start_time, finish_time)
+            
+            # 4. Advance current time to the finish time of this operation
+            self.state.advance_time(finish_time)
+            
+            # Calculate dense reward: negative change in objective function
+            current_objective = self.beta * self.state.current_makespan + self.alpha * self.state.current_twt
+            
             if self.last_objective is not None:
-                reward = self.last_objective - objective
-            self.last_objective = objective
-        else:
-            reward = 0.0
-        info = {
-            'makespan': self.current_makespan,
-            'twt': self.current_twt,
-            'current_time': self.current_time,
-            'action_mask': self.get_action_mask()
-        }
-        return self._get_observation(), reward, done, info
+                # Reward is negative change in objective (improvement = positive reward)
+                reward = self.last_objective - current_objective
+            else:
+                # First step: no reward (or small initialization reward)
+                reward = 0.0
+            
+            self.last_objective = current_objective
+            
+            info = {
+                'makespan': self.state.current_makespan,
+                'twt': self.state.current_twt,
+                'current_time': self.state.current_time,
+                'action_mask': self.state.get_action_mask()
+            }
+            
+            obs = self.state.get_observation()
+        return obs.numpy(), reward, terminated, False, info
     
     def get_action_mask(self) -> torch.Tensor:
         """Get the current action mask."""
-        return self._get_action_mask()
+        return self.state.get_action_mask()
     
     def get_schedule_info(self) -> Dict[str, Any]:
         """Get detailed schedule information for visualization."""
-        schedule = {
-            'job_completion_times': {},
-            'machine_schedules': {},
-            'makespan': self.current_makespan,
-            'total_weighted_tardiness': self.current_twt,
-            'operation_schedules': self.operation_schedules
-        }
-        # Job completion times
-        for job_id, job_state in enumerate(self.job_states):
-            if job_state['finish_time'] is not None:
-                schedule['job_completion_times'][job_id] = job_state['finish_time']
-        # Machine schedules (only finish_time is tracked)
-        for machine_id, machine_state in enumerate(self.machine_states):
-            schedule['machine_schedules'][machine_id] = {
-                'finish_time': machine_state['finish_time']
-            }
-        return schedule 
+        return self.state.get_schedule_info()
+    
+    def get_state_summary(self) -> Dict[str, Any]:
+        """Get a summary of the current state."""
+        return self.state.get_state_summary() 

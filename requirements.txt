@@ -3,7 +3,9 @@ gurobipy
 matplotlib
 plotly
 torch
-gym
 tqdm
 kaleido
 wandb
+sb3-contrib
+stable-baselines3
+stable-baselines3[extra]

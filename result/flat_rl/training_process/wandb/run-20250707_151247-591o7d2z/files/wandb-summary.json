@@ -1,0 +1,1 @@
+{"_step":499,"_timestamp":1.7518726188919666e+09,"_wandb":{"runtime":250},"clip_fraction":0.1944444477558136,"_runtime":250,"value_loss":10185.80078125,"entropy_loss":-2.8866090774536133,"total_loss":10182.861756153405,"policy_loss":-0.05241601914167404}

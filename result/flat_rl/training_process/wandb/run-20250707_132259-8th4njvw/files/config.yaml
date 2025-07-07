@@ -1,0 +1,84 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            et6p0wq4hlo77bd9ghxnhsm9t5z29ghz:
+                codePath: rl_experiment_fixed.py
+                codePathLocal: rl_experiment_fixed.py
+                cpu_count: 32
+                cpu_count_logical: 64
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "588412764160"
+                        used: "181886296064"
+                email: okumochu55@gmail.com
+                executable: /home/r13725046okumo/miniconda3/envs/dfjs/bin/python
+                git:
+                    commit: 477ec38367381c050933d4748c48adf283d0039a
+                    remote: git@github.com:okumochu/Dynamic-Flexible-Job-Shop-Package.git
+                gpu: Quadro RTX 6000
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Turing
+                      cudaCores: 4608
+                      memoryTotal: "25769803776"
+                      name: Quadro RTX 6000
+                      uuid: GPU-56f43da4-1deb-c532-3a59-75303aabf3d2
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-41575f01-33f8-a380-7e12-d3927e3fc83c
+                host: ubuntu-ProLiant-DL380-Gen10
+                memory:
+                    total: "134792536064"
+                os: Linux-6.11.0-26-generic-x86_64-with-glibc2.39
+                program: /home/r13725046okumo/project/Dynamic-Flexible-Job-Shop-Package/rl_experiment_fixed.py
+                python: CPython 3.12.11
+                root: result/flat_rl/training_process
+                startedAt: "2025-07-07T05:22:59.158086Z"
+                writerId: et6p0wq4hlo77bd9ghxnhsm9t5z29ghz
+        m: []
+        python_version: 3.12.11
+        t:
+            "1":
+                - 1
+                - 105
+            "2":
+                - 1
+                - 105
+            "3":
+                - 16
+            "4": 3.12.11
+            "5": 0.21.0
+            "12": 0.21.0
+            "13": linux-x86_64
+clip_ratio:
+    value: 0.2
+entropy_coeff:
+    value: 0.005
+epochs:
+    value: 100
+gae_lambda:
+    value: 0.97
+gamma:
+    value: 0.99
+hidden_dim:
+    value: 128
+max_grad_norm:
+    value: 0.5
+pi_lr:
+    value: 0.0001
+steps_per_epoch:
+    value: 2000
+target_kl:
+    value: 0.1
+train_pi_iters:
+    value: 20
+train_v_iters:
+    value: 20
+v_lr:
+    value: 0.0005
+value_coeff:
+    value: 0.1

@@ -28,9 +28,6 @@ class PolicyShowcaser:
                 gamma=config['gamma'],
                 gae_lambda=config['gae_lambda'],
                 clip_ratio=config['clip_ratio'],
-                entropy_coeff=config['entropy_coeff'],
-                value_coeff=config['value_coeff'],
-                max_grad_norm=config['max_grad_norm'],
                 device=config['device']
             )
         except Exception as e:
@@ -38,7 +35,7 @@ class PolicyShowcaser:
             print("Falling back to environment-based configuration...")
             # Fallback to environment-based configuration
             obs_shape = env.observation_space.shape
-            action_dim = env.action_space.n
+            action_dim = int(env.action_space.n)
             self.agent = PPOWorker(
                 obs_shape=obs_shape,
                 action_dim=action_dim,
@@ -48,9 +45,6 @@ class PolicyShowcaser:
                 gamma=0.99,  # Default gamma
                 gae_lambda=0.95,  # Default GAE lambda
                 clip_ratio=0.2,  # Default clip ratio
-                entropy_coeff=0.01,  # Default entropy coefficient
-                value_coeff=0.5,  # Default value coefficient
-                max_grad_norm=0.5,  # Default max gradient norm
                 device='auto'  # Auto-detect device
             )
         
@@ -58,7 +52,8 @@ class PolicyShowcaser:
         self.agent.load(model_path)
 
     def showcase(self, render_gantt=True, gantt_save_path=None):
-        obs = self.env.reset()
+        obs, _ = self.env.reset()
+        obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
         done = False
         total_reward = 0
         makespan = None
@@ -70,7 +65,9 @@ class PolicyShowcaser:
                 # No valid actions, break out of loop
                 break
             action = self.agent.get_deterministic_action(obs, action_mask)
-            obs, reward, done, info = self.env.step(action)
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
+            obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
             total_reward += reward
             schedule_history.append(self.env.get_schedule_info())
             makespan = info.get('makespan', None)

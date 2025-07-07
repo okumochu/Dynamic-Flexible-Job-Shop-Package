@@ -19,9 +19,6 @@ class PPOWorker:
                  gamma,
                  gae_lambda,
                  clip_ratio,
-                 entropy_coeff,
-                 value_coeff,
-                 max_grad_norm,
                  device='auto'):
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -32,9 +29,6 @@ class PPOWorker:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
-        self.entropy_coeff = entropy_coeff
-        self.value_coeff = value_coeff
-        self.max_grad_norm = max_grad_norm
         self.policy = PolicyNetwork(obs_shape, action_dim, hidden_dim).to(self.device)
         self.value = ValueNetwork(obs_shape, hidden_dim).to(self.device)
         self.pi_lr = pi_lr
@@ -111,8 +105,7 @@ class PPOWorker:
             policy_loss = -torch.min(surr1, surr2).mean()
             entropy_loss = -dist.entropy().mean()
             self.policy_optimizer.zero_grad()
-            (policy_loss + self.entropy_coeff * entropy_loss).backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            (policy_loss + entropy_loss).backward()
             self.policy_optimizer.step()
             # KL divergence for early stopping
             with torch.no_grad():
@@ -126,7 +119,6 @@ class PPOWorker:
             value_loss = F.mse_loss(values.squeeze(), returns)
             self.value_optimizer.zero_grad()
             value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.value.parameters(), self.max_grad_norm)
             self.value_optimizer.step()
         # Logging
         clip_mask = abs(ratio - 1) > self.clip_ratio
@@ -135,7 +127,7 @@ class PPOWorker:
             'policy_loss': float(policy_loss.item()),
             'value_loss': float(value_loss.item()),
             'entropy_loss': float(entropy_loss.item()),
-            'total_loss': float(policy_loss.item() + self.value_coeff * value_loss.item() + self.entropy_coeff * entropy_loss.item()),
+            'total_loss': float(policy_loss.item() + value_loss.item() + entropy_loss.item()),
             'clip_fraction': float(clip_fraction),
             'kl': float(approx_kl)
         }
@@ -159,9 +151,6 @@ class PPOWorker:
             'gamma': self.gamma,
             'gae_lambda': self.gae_lambda,
             'clip_ratio': self.clip_ratio,
-            'entropy_coeff': self.entropy_coeff,
-            'value_coeff': self.value_coeff,
-            'max_grad_norm': self.max_grad_norm,
             'device': str(self.device)
         }, path)
     def load(self, path: str):
@@ -206,9 +195,6 @@ class PPOWorker:
                 'gamma': checkpoint['gamma'],
                 'gae_lambda': checkpoint['gae_lambda'],
                 'clip_ratio': checkpoint['clip_ratio'],
-                'entropy_coeff': checkpoint['entropy_coeff'],
-                'value_coeff': checkpoint['value_coeff'],
-                'max_grad_norm': checkpoint['max_grad_norm'],
                 'device': checkpoint['device']
             }
         else:

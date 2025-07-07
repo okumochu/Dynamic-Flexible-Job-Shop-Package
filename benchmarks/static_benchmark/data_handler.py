@@ -176,6 +176,22 @@ class FlexibleJobShopDataHandler:
     def get_jobs_weight(self) -> List[int]:
         """Get list of weights for all jobs."""
         return [job.weight for job in self.jobs]
+
+    def get_average_processing_time(self) -> float:
+        """Get average processing time for all operations across all compatible machines"""
+        total_processing_time = 0
+        for op in self.operations:
+            sum_op_processing_time = sum(op.machine_processing_times.values())
+            total_processing_time += sum_op_processing_time / len(op.machine_processing_times)
+        return total_processing_time / self.num_operations
+
+    def get_max_weight(self) -> int:
+        """Get max weight for all jobs."""
+        return max(self.get_jobs_weight())
+
+    def get_max_due_date(self) -> int:
+        """Get max due date for all jobs."""
+        return max(self.get_jobs_due_date())
     
     def get_total_weighted_tardiness(self, completion_times: Dict[int, int]) -> int:
         """

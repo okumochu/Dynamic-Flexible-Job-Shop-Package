@@ -1,0 +1,1 @@
+{"episode_makespan":135,"_timestamp":1.7519860930149205e+09,"_step":2510,"total_loss":65930.01505522244,"episode_reward":-1149,"_runtime":676,"kl":0.05158008635044098,"policy_loss":-0.016194777563214302,"_wandb":{"runtime":676},"episode_twt":2163,"value_loss":65930.03125}

@@ -1,1 +1,0 @@
-{"_timestamp":1.7514638850681732e+09,"reward":0,"makespan":121,"_runtime":8,"entropy_loss":-1.4582285284996033,"_step":109,"episode":99,"value_loss":0.0901384986937046,"clip_fraction":0.5296296328306198,"twt":1544,"total_loss":0.11100762151181698,"update_step":90,"_wandb":{"runtime":8},"policy_loss":0.06739660445600748}

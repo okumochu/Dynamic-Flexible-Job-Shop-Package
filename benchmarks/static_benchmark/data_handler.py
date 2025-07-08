@@ -30,7 +30,7 @@ class FlexibleJobShopDataHandler:
         """
         self.data_source = data_source
         self.data_type = data_type
-        self.jobs: List[Job] = []
+        self.jobs: Dict[int, Job] = {}
         self.operations: List[Operation] = []
         self.num_jobs: int = 0
         self.num_machines: int = 0
@@ -46,15 +46,17 @@ class FlexibleJobShopDataHandler:
         """Load data using the DataGenerator interface."""
         if self.data_type == "dataset":
             if isinstance(self.data_source, str):
-                self.jobs, self.operations, self.num_jobs, self.num_machines, self.num_operations = \
+                jobs, self.operations, self.num_jobs, self.num_machines, self.num_operations = \
                     DataGenerator.load_from_dataset(self.data_source)
+                self.jobs = {job.job_id: job for job in jobs}
             else:
                 raise ValueError("For dataset type, data_source must be a string (file path)")
         
         elif self.data_type == "simulation":
             if isinstance(self.data_source, dict):
-                self.jobs, self.operations, self.num_jobs, self.num_machines, self.num_operations = \
+                jobs, self.operations, self.num_jobs, self.num_machines, self.num_operations = \
                     DataGenerator.generate_synthetic_data(**self.data_source)
+                self.jobs = {job.job_id: job for job in jobs}
             else:
                 raise ValueError("For simulation type, data_source must be a dictionary of parameters")
         
@@ -72,10 +74,10 @@ class FlexibleJobShopDataHandler:
                 self.machine_operations[machine_id].append(operation)
         
         # Job-operation matrix (jobs x max_operations)
-        max_ops_per_job = max(len(job.operations) for job in self.jobs)
+        max_ops_per_job = max(len(job.operations) for job in self.jobs.values())
         self.job_operation_matrix = np.zeros((self.num_jobs, max_ops_per_job), dtype=int)
         
-        for job in self.jobs:
+        for job in self.jobs.values():
             for op_idx, operation in enumerate(job.operations):
                 self.job_operation_matrix[job.job_id, op_idx] = operation.operation_id
         
@@ -140,11 +142,11 @@ class FlexibleJobShopDataHandler:
     
     def get_operations_each_jobs(self) -> List[List[int]]:
         """Get list of operation_id for each job."""
-        return [[op.operation_id for op in job.operations] for job in self.jobs]
+        return [[op.operation_id for op in job.operations] for job in self.jobs.values()]
     
     def get_compatible_machines_each_jobs(self) -> List[List[List[int]]]:
         """Get list of compatible machine_id for each operation in each job."""
-        return [[op.compatible_machines for op in job.operations] for job in self.jobs]
+        return [[op.compatible_machines for op in job.operations] for job in self.jobs.values()]
     
     def get_operation_info(self, operation_id: int) -> Tuple[int, int]:
         """Get job_id and operation position for a given operation_id."""
@@ -171,11 +173,11 @@ class FlexibleJobShopDataHandler:
     
     def get_jobs_due_date(self) -> List[int]:
         """Get list of due dates for all jobs."""
-        return [job.due_date for job in self.jobs]
+        return [job.due_date for job in self.jobs.values()]
     
     def get_jobs_weight(self) -> List[int]:
         """Get list of weights for all jobs."""
-        return [job.weight for job in self.jobs]
+        return [job.weight for job in self.jobs.values()]
 
     def get_average_processing_time(self) -> float:
         """Get average processing time for all operations across all compatible machines"""
@@ -204,7 +206,7 @@ class FlexibleJobShopDataHandler:
             Total weighted tardiness
         """
         total_twt = 0
-        for job in self.jobs:
+        for job in self.jobs.values():
             if job.job_id in completion_times:
                 total_twt += job.get_weighted_tardiness(completion_times[job.job_id])
         
@@ -222,7 +224,7 @@ class FlexibleJobShopDataHandler:
             "avg_operations_per_job": self.num_operations / self.num_jobs,
             "avg_processing_time": sum(op.min_processing_time for op in self.operations) / self.num_operations,
             "machine_loads": {f"machine_{i}": self.get_machine_load(i) for i in range(self.num_machines)},
-            "job_processing_times": {f"job_{job.job_id}": job.total_processing_time for job in self.jobs},
+            "job_processing_times": {f"job_{job.job_id}": job.total_processing_time for job in self.jobs.values()},
             "data_type": self.data_type,
             "data_source": str(self.data_source) if isinstance(self.data_source, str) else "simulation",
             "due_dates": {f"job_{i}": due_dates[i] for i in range(self.num_jobs)},

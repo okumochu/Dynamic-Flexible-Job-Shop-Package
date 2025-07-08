@@ -1,1 +1,0 @@
-{"episode":1213,"objective":1401.5,"makespan":180,"total_loss":5.838854121975601e-05,"_timestamp":1.75152168833802e+09,"reward":0,"_wandb":{"runtime":138},"entropy_loss":-1.432135820388794,"policy_loss":0.0008320692577399313,"value_loss":0.0013169099693186581,"clip_fraction":0.19100000709295273,"twt":2623,"_runtime":138,"_step":1335}

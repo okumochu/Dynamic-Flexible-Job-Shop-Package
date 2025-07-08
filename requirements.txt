@@ -9,3 +9,4 @@ wandb
 sb3-contrib
 stable-baselines3
 stable-baselines3[extra]
+gymnasium

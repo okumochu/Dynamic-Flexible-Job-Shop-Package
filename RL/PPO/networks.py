@@ -7,14 +7,13 @@ class PolicyNetwork(nn.Module):
     Separate policy network for PPO agent.
     Takes observation and outputs action logits.
     """
-    def __init__(self, obs_shape, action_dim, hidden_dim):
+    def __init__(self, input_dim, action_dim, hidden_dim):
         super().__init__()
-        input_dim = obs_shape[0]  # 1D observation
         self.backbone = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(input_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim // 2, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -38,9 +37,8 @@ class ValueNetwork(nn.Module):
     Separate value network for PPO agent.
     Takes observation and outputs state value.
     """
-    def __init__(self, obs_shape, hidden_dim):
+    def __init__(self, input_dim, hidden_dim):
         super().__init__()
-        input_dim = obs_shape[0]  # 1D observation
         self.backbone = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),

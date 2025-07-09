@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import gymnasium as gym
 from gymnasium import spaces
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
-from RL.flat_rl_state import FlatRLState
+from RL.state import FlatRLState
 
 class FlatRLEnv(gym.Env):
     """

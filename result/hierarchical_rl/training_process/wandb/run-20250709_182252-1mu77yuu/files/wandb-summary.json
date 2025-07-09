@@ -1,0 +1,1 @@
+{"epoch":299,"episode_reward":-970.5,"episode_makespan":125,"worker_policy_loss":-0.00024404129362665117,"_runtime":149,"_step":1499,"worker_value_loss":43.24385070800781,"_timestamp":1.7520567228405795e+09,"manager_loss":376593.5625,"episode_twt":1816,"alpha":0.10299999999999998,"avg_goal_norm":1,"avg_cosine_alignment":-0.6339540481567383,"_wandb":{"runtime":149}}

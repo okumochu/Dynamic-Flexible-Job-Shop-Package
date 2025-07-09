@@ -4,7 +4,7 @@ from RL.flat_rl_env import FlatRLEnv
 from RL.flat_rl_trainer import FlatRLTrainer
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 import wandb
-from utils.policy_showcaser import PolicyShowcaser
+from utils.policy_utils import showcase_flat_policy, create_gantt_chart
 
 # Set wandb output directory
 training_process_dir = "result/flat_rl/training_process"
@@ -12,54 +12,7 @@ model_dir = "result/flat_rl/model"
 os.environ["WANDB_DIR"] = training_process_dir
 
 
-def test_environment_setup():
-    """Test basic environment setup."""
-    print("\nTesting environment setup...")
-    
-    try:
-        # Create a minimal test environment
-        test_params = {
-            'num_jobs': 2, 
-            'num_machines': 2,
-            'operation_lb': 1,
-            'operation_ub': 2,
-            'processing_time_lb': 1,
-            'processing_time_ub': 3,   
-            'compatible_machines_lb': 1,
-            'compatible_machines_ub': 2,
-            'seed': 42,
-        }
-        
-        data_handler = FlexibleJobShopDataHandler(data_source=test_params, data_type="simulation")
-        env = FlatRLEnv(data_handler, alpha=0.0)
-        
-        # Test basic environment functions
-        obs, _ = env.reset()
-        print(f"✓ Environment reset successful, obs shape: {obs.shape}")
-        
-        action_mask = env.get_action_mask()
-        print(f"✓ Action mask generated, valid actions: {action_mask.sum().item()}")
-        
-        if action_mask.any():
-            valid_action = int(torch.where(action_mask)[0][0].item())
-            obs, reward, terminated, truncated, info = env.step(valid_action)
-            print(f"✓ Environment step successful, reward: {reward:.2f}")
-        
-        print("✓ Environment test passed")
-        return True
-        
-    except Exception as e:
-        print(f"✗ Environment test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
 def main():
-
-    
-    if not test_environment_setup():
-        print("\nEnvironment test failed! Exiting.")
-        return
     
     print("\n" + "="*50)
     print("Starting main experiment...")
@@ -81,17 +34,18 @@ def main():
         'compatible_machines_ub': 2,
         'seed': 42,
     }
+    total_max_steps = simulation_params['num_jobs'] * simulation_params['operation_ub'] * simulation_params['num_machines']
     rl_params = {
         'alpha': 0.5,
         'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'steps_per_epoch': 50,
-        'epochs': 1000,  
+        'gae_lambda': 0.9,
+        'steps_per_epoch': total_max_steps,
+        'epochs': 500,  
         'pi_lr': 1e-5,  # Reduced from 3e-5
         'v_lr': 1e-5,   # Reduced from 1e-4
         'target_kl': 0.5,  # Increased from 0.1
-        'train_pi_iters': 50,
-        'train_v_iters': 50,
+        'train_pi_iters': total_max_steps,
+        'train_v_iters': total_max_steps,
     }
     
     print("Creating data handler and environment...")
@@ -141,12 +95,14 @@ def main():
         gantt_save_path_trainer = os.path.join(training_process_dir, "gantt_trainer.png")
         trainer.visualize_schedule(evaluation_result, save_path=gantt_save_path_trainer)
         
-        # Also showcase using PolicyShowcaser
-        print("Creating Gantt chart using PolicyShowcaser...")
+        # Also showcase using flat policy showcase function
+        print("Creating Gantt chart using showcase function...")
         try:
-            showcaser = PolicyShowcaser(model_dir=model_dir, env=env)
             gantt_save_path_showcaser = os.path.join(training_process_dir, "gantt_showcase.png")
-            showcaser_result = showcaser.showcase(render_gantt=True, gantt_save_path=gantt_save_path_showcaser)
+            showcaser_result = showcase_flat_policy(model_dir=model_dir, env=env)
+            
+            # Create Gantt chart separately
+            create_gantt_chart(showcaser_result, save_path=gantt_save_path_showcaser, title_suffix="Flat RL")
             
             print("\nShowcase Results:")
             print(f"  Makespan: {showcaser_result['makespan']:.2f}")
@@ -156,7 +112,7 @@ def main():
             print(f"  Valid Completion: {showcaser_result['is_valid_completion']}")
             
         except Exception as e:
-            print(f"PolicyShowcaser failed: {e}")
+            print(f"Showcase function failed: {e}")
             print("Using trainer evaluation result instead.")
         
         print(f"\nExperiment completed successfully!")

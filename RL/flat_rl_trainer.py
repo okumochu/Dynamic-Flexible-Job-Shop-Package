@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import gymnasium as gym
 from gymnasium import spaces
 import wandb
-from RL.PPO.ppo_worker import PPOWorker
+from RL.PPO.flat_agent import FlatAgent
 from RL.PPO.buffer import PPOBuffer
 from RL.flat_rl_env import FlatRLEnv
 
@@ -80,7 +80,7 @@ class FlatRLTrainer:
         obs_shape = (obs_dim,)
         action_space = cast(spaces.Discrete, env.action_space)
         action_dim = int(action_space.n)
-        self.agent = PPOWorker(
+        self.agent = FlatAgent(
             input_dim=obs_dim,
             action_dim=action_dim,
             hidden_dim=hidden_dim,

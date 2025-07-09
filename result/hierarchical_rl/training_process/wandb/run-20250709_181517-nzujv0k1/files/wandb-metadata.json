@@ -1,0 +1,46 @@
+{
+  "os":  "Linux-6.11.0-26-generic-x86_64-with-glibc2.39",
+  "python":  "CPython 3.12.11",
+  "startedAt":  "2025-07-09T10:15:17.634009Z",
+  "program":  "/home/r13725046okumo/project/Dynamic-Flexible-Job-Shop-Package/hrl_experiment.py",
+  "codePath":  "hrl_experiment.py",
+  "codePathLocal":  "hrl_experiment.py",
+  "git":  {
+    "remote":  "git@github.com:okumochu/Dynamic-Flexible-Job-Shop-Package.git",
+    "commit":  "ae77eae531972e72760c863f8218be71658101b2"
+  },
+  "root":  "result/hierarchical_rl/training_process",
+  "host":  "ubuntu-ProLiant-DL380-Gen10",
+  "executable":  "/home/r13725046okumo/miniconda3/envs/dfjs/bin/python",
+  "cpu_count":  32,
+  "cpu_count_logical":  64,
+  "gpu":  "Quadro RTX 6000",
+  "gpu_count":  2,
+  "disk":  {
+    "/":  {
+      "total":  "588412764160",
+      "used":  "187451301888"
+    }
+  },
+  "memory":  {
+    "total":  "134792536064"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "Quadro RTX 6000",
+      "memoryTotal":  "25769803776",
+      "cudaCores":  4608,
+      "architecture":  "Turing",
+      "uuid":  "GPU-56f43da4-1deb-c532-3a59-75303aabf3d2"
+    },
+    {
+      "name":  "NVIDIA RTX A6000",
+      "memoryTotal":  "51527024640",
+      "cudaCores":  10752,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-41575f01-33f8-a380-7e12-d3927e3fc83c"
+    }
+  ],
+  "cudaVersion":  "12.8",
+  "writerId":  "6vaygkfapg144ejr8btxb0docw7fnwqp"
+}

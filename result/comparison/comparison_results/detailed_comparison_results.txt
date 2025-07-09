@@ -1,0 +1,23 @@
+DETAILED COMPARISON EXPERIMENT RESULTS
+============================================================
+
+EXPERIMENT CONFIGURATION:
+------------------------------
+Problem Size: 12 jobs × 4 machines
+Operations per job: 4-4
+Processing time range: 5-5
+Compatible machines: 2-2
+TWT Weight: 0.5
+Random seed: 42
+
+ALGORITHM PARAMETERS:
+-------------------------
+RL Parameters: {'alpha': 0.5, 'gamma': 0.99, 'gae_lambda': 0.9, 'steps_per_epoch': 192, 'epochs': 500, 'pi_lr': 1e-05, 'v_lr': 1e-05, 'target_kl': 0.5, 'train_pi_iters': 192, 'train_v_iters': 192}
+MILP Time Limit: 1800s
+
+PERFORMANCE RESULTS:
+--------------------
+Method   Makespan     TWT          Objective    Time (s)     Status         
+--------------------------------------------------------------------------------
+RL       85.00        79.00        124.50       5.91         Completed      
+MILP     60.00        -0.00        30.00        1800.05      Time Limit     

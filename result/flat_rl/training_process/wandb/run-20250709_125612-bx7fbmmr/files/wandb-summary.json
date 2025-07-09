@@ -1,0 +1,1 @@
+{"_timestamp":1.752037401258763e+09,"_step":1999,"total_loss":11047.98365944624,"kl":0.07551813870668411,"_wandb":{"runtime":428},"value_loss":11047.974609375,"episode_reward":-646.5,"_runtime":428,"episode_twt":1193,"policy_loss":0.009050071239471436,"episode_makespan":100}

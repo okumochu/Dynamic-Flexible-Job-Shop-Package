@@ -3,8 +3,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 import numpy as np
-from .networks import PolicyNetwork, ValueNetwork
-from .buffer import PPOBuffer
+from networks import PolicyNetwork, ValueNetwork
+from buffer import PPOBuffer
 from typing import Tuple
 
 class FlatAgent:
@@ -14,12 +14,12 @@ class FlatAgent:
     def __init__(self, 
                  input_dim,
                  action_dim,
-                 hidden_dim,
                  pi_lr,
                  v_lr,
                  gamma,
                  gae_lambda,
                  clip_ratio,
+                 entropy_coef=0.01,
                  device='auto'):
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -30,8 +30,9 @@ class FlatAgent:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
-        self.policy = PolicyNetwork(input_dim, action_dim, hidden_dim).to(self.device)
-        self.value = ValueNetwork(input_dim, hidden_dim).to(self.device)
+        self.entropy_coef = entropy_coef
+        self.policy = PolicyNetwork(input_dim, action_dim).to(self.device)
+        self.value = ValueNetwork(input_dim).to(self.device)
         self.pi_lr = pi_lr
         self.v_lr = v_lr
         self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=pi_lr)
@@ -39,7 +40,6 @@ class FlatAgent:
         
         # Store configuration parameters for saving
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
         
         self.training_stats = {
             'policy_loss': [],
@@ -123,6 +123,7 @@ class FlatAgent:
             masked_logits[~batch['action_masks']] = float('-inf')
             dist = Categorical(logits=masked_logits)
             new_log_probs = dist.log_prob(batch['actions'])
+            entropy = dist.entropy().mean()
 
 
             # clip 
@@ -137,9 +138,12 @@ class FlatAgent:
             surr2 = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
             
+            # Total policy loss with entropy penalty
+            total_policy_loss = policy_loss - self.entropy_coef * entropy
+            
             # update policy
             self.policy_optimizer.zero_grad()
-            (policy_loss).backward()
+            total_policy_loss.backward()
             self.policy_optimizer.step()
 
             # KL divergence for early stopping (appox_kl = old_policy_log_prob - new_policy_log_prob)
@@ -161,7 +165,8 @@ class FlatAgent:
         stats = {
             'policy_loss': float(policy_loss.item()),
             'value_loss': float(value_loss.item()),
-            'total_loss': float(policy_loss.item() + value_loss.item()),
+            'entropy': float(entropy.item()),
+            'total_loss': float(total_policy_loss.item() + value_loss.item()),
             'kl': float(approx_kl)
         }
         for k in stats:
@@ -180,12 +185,12 @@ class FlatAgent:
             # Save configuration parameters
             'input_dim': self.input_dim,
             'action_dim': self.action_dim,
-            'hidden_dim': self.hidden_dim,
             'pi_lr': self.pi_lr,
             'v_lr': self.v_lr,
             'gamma': self.gamma,
             'gae_lambda': self.gae_lambda,
             'clip_ratio': self.clip_ratio,
+            'entropy_coef': self.entropy_coef,
             'device': str(self.device)
         }, path)
 
@@ -213,12 +218,12 @@ class FlatAgent:
             return {
                 'input_dim': checkpoint['input_dim'],
                 'action_dim': checkpoint['action_dim'],
-                'hidden_dim': checkpoint['hidden_dim'],
                 'pi_lr': checkpoint['pi_lr'],
                 'v_lr': checkpoint['v_lr'],
                 'gamma': checkpoint['gamma'],
                 'gae_lambda': checkpoint['gae_lambda'],
                 'clip_ratio': checkpoint['clip_ratio'],
+                'entropy_coef': checkpoint.get('entropy_coef', 0.01),  # Default for backward compatibility
                 'device': checkpoint['device']
             }
         else:

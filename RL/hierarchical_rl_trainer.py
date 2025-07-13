@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import wandb
 
 # Import from restructured modules
-from RL.PPO.buffer import PPOBuffer
+from RL.PPO.buffer import PPOBuffer, HierarchicalBuffer
 from RL.PPO.hierarichical_agent import HierarchicalAgent
 from RL.hierarchical_rl_env import HierarchicalRLEnv
 
@@ -32,7 +32,6 @@ class HierarchicalRLTrainer:
                  dilation: int = 10,  # Manager horizon c
                  latent_dim: int = 256,
                  goal_dim: int = 32,
-                 hidden_dim: int = 512,
                  manager_lr: float = 3e-4,
                  worker_lr: float = 3e-4,
                  alpha_start: float = 1.0,  # Intrinsic reward weight
@@ -60,8 +59,7 @@ class HierarchicalRLTrainer:
             action_dim=env.action_dim,
             latent_dim=latent_dim,
             goal_dim=goal_dim,
-            hidden_dim=hidden_dim,
-            dilation=dilation,
+            goal_duration=dilation,  # Use dilation as goal_duration (c parameter)
             manager_lr=manager_lr,
             worker_lr=worker_lr,
             gamma_manager=gamma_manager,
@@ -112,6 +110,11 @@ class HierarchicalRLTrainer:
             self.steps_per_epoch, (self.env.obs_len,), self.env.action_dim, self.agent.device
         )
         
+        # Use HierarchicalBuffer for hierarchical data collection
+        hierarchical_buffer = HierarchicalBuffer(
+            self.steps_per_epoch, self.agent.latent_dim, self.agent.device
+        )
+        
         start_time = time.time()
         pbar = tqdm(range(self.epochs), desc="Hierarchical Training")
         
@@ -120,11 +123,14 @@ class HierarchicalRLTrainer:
             alpha = self.alpha_start + (self.alpha_end - self.alpha_start) * (epoch / self.epochs)
             
             # Collect rollouts
-            self.collect_rollouts(buffer, alpha)
+            self.collect_rollouts(buffer, hierarchical_buffer, alpha)
+            
+            # Get hierarchical data from buffer
+            encoded_states, goals, pooled_goals = hierarchical_buffer.get_data()
             
             # Update both manager and worker using agent methods
             manager_stats = self.agent.update_manager()
-            worker_stats = self.agent.update_worker(buffer)
+            worker_stats = self.agent.update_worker(buffer, encoded_states, goals, pooled_goals)
             
             # Log statistics
             self.training_history['manager_stats'].append(manager_stats)
@@ -141,11 +147,8 @@ class HierarchicalRLTrainer:
             })
             
             buffer.clear()
+            hierarchical_buffer.clear()
             self.agent.clear_manager_data()
-            
-            # Save model periodically
-            if (epoch + 1) % 50 == 0:
-                self.save_model(f"checkpoint_epoch_{epoch + 1}.pth")
         
         training_time = time.time() - start_time
         pbar.close()
@@ -157,17 +160,16 @@ class HierarchicalRLTrainer:
             'training_history': self.training_history
         }
     
-    def collect_rollouts(self, buffer, alpha):
-        """Collect rollouts with hierarchical policy using HierarchicalAgent"""
+    def collect_rollouts(self, buffer, hierarchical_buffer, alpha):
+        """Collect rollouts with hierarchical policy using HierarchicalAgent and HierarchicalBuffer"""
         obs, _ = self.env.reset()
         obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
+        hierarchical_buffer.mark_episode_start()
         
         # Manager state
-        manager_hidden = None
-        current_goal = torch.zeros(self.agent.latent_dim, device=self.agent.device)
         goals_history = []
         encoded_states_history = []
-        prev_r_int = 0.0
+        pooled_goals_history = []
         
         episode_reward = 0
         step = 0
@@ -180,9 +182,7 @@ class HierarchicalRLTrainer:
             # Manager decision (every dilation steps)
             if step % self.dilation == 0:
                 # Manager emits new goal
-                goal, manager_value, manager_hidden = self.agent.get_manager_goal(
-                    z_t, step, manager_hidden
-                )
+                goal, manager_value = self.agent.get_manager_goal(z_t)
                 
                 # Add epsilon-greedy exploration to goals
                 if goal is not None and torch.rand(1).item() < self.agent.epsilon_greedy:
@@ -196,8 +196,7 @@ class HierarchicalRLTrainer:
                 if len(goals_history) > 1 and manager_value is not None:  # Not first goal and valid value
                     prev_goal_idx = len(goals_history) - 2
                     manager_reward = self.agent.compute_manager_reward(
-                        encoded_states_history, goals_history, prev_goal_idx, step,
-                        episode_ended=False, final_reward=0.0
+                        encoded_states_history, goals_history, prev_goal_idx, step - self.dilation
                     )
                     
                     # Add manager experience to agent
@@ -212,13 +211,18 @@ class HierarchicalRLTrainer:
                         )
             
             # Pool goals for worker using agent
-            pooled_goal = self.agent.pool_goals(goals_history, step)
+            pooled_goal = self.agent.pool_goals(goals_history, step, self.dilation)
+            pooled_goals_history.append(pooled_goal)
+            
+            # Add to hierarchical buffer
+            current_goal = goals_history[-1] if goals_history else None
+            hierarchical_buffer.add(z_t, current_goal, pooled_goal, step)
             
             # Worker action using agent
             action_mask = self.env.get_action_mask()
             
             action, log_prob, worker_value = self.agent.take_action(
-                obs, action_mask, pooled_goal, prev_r_int
+                obs, action_mask, pooled_goal
             )
             
             # Environment step
@@ -228,7 +232,7 @@ class HierarchicalRLTrainer:
             
             # Compute intrinsic reward using agent
             reward_int = self.agent.compute_intrinsic_reward(
-                encoded_states_history, goals_history, step
+                encoded_states_history, goals_history, step, self.dilation
             )
             
             # Mixed reward for worker
@@ -238,7 +242,8 @@ class HierarchicalRLTrainer:
             buffer.add(obs, action, reward_mixed, worker_value, log_prob, action_mask, done)
             
             episode_reward += reward_ext
-            prev_r_int = reward_int
+            # Update episode reward in agent
+            self.agent.update_episode_reward(reward_ext)
             obs = next_obs
             step += 1
             
@@ -247,8 +252,7 @@ class HierarchicalRLTrainer:
                 if len(goals_history) > 0:
                     final_goal_idx = len(goals_history) - 1
                     final_manager_reward = self.agent.compute_manager_reward(
-                        encoded_states_history, goals_history, final_goal_idx, step,
-                        episode_ended=True, final_reward=episode_reward
+                        encoded_states_history, goals_history, final_goal_idx, step - self.dilation
                     )
                     
                     # Add final manager experience
@@ -270,15 +274,19 @@ class HierarchicalRLTrainer:
                 self.training_history['episode_makespans'].append(info['makespan'])
                 self.training_history['episode_twts'].append(info['twt'])
                 
+                # Mark episode end in hierarchical buffer
+                hierarchical_buffer.mark_episode_end()
+                
                 # Reset for new episode
                 obs, _ = self.env.reset()
                 obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
+                hierarchical_buffer.mark_episode_start()
                 manager_hidden = None
                 current_goal = torch.zeros(self.agent.latent_dim, device=self.agent.device)
                 goals_history = []
                 encoded_states_history = []
+                pooled_goals_history = []
                 episode_reward = 0
-                prev_r_int = 0.0
     
     def save_model(self, filename: str):
         """Save model using agent's save method"""
@@ -309,7 +317,6 @@ class HierarchicalRLTrainer:
             current_goal = torch.zeros(self.agent.latent_dim, device=self.agent.device)
             goals_history = []
             encoded_states_history = []
-            prev_r_int = 0.0
             
             episode_reward = 0
             step = 0
@@ -322,12 +329,12 @@ class HierarchicalRLTrainer:
                 
                 # Manager decision
                 if step % self.dilation == 0:
-                    goal, _, manager_hidden = self.agent.get_manager_goal(z_t, step, manager_hidden)
+                    goal, _ = self.agent.get_manager_goal(z_t)
                     current_goal = goal
                     goals_history.append(goal)
                 
                 # Pool goals for worker
-                pooled_goal = self.agent.pool_goals(goals_history, step)
+                pooled_goal = self.agent.pool_goals(goals_history, step, self.dilation)
                 
                 # Worker action (deterministic)
                 action_mask = self.env.get_action_mask()
@@ -335,7 +342,7 @@ class HierarchicalRLTrainer:
                     break
                 
                 action = self.agent.get_deterministic_action(
-                    obs, action_mask, pooled_goal, prev_r_int
+                    obs, action_mask, pooled_goal
                 )
                 
                 # Environment step

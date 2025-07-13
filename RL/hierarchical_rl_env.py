@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import gymnasium as gym
 from gymnasium import spaces
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
-from RL.state import FlatRLState
+from RL.state import State
 
 class HierarchicalRLEnv(gym.Env):
     """
@@ -33,7 +33,7 @@ class HierarchicalRLEnv(gym.Env):
         super().__init__()
         
         # Initialize state manager (reuse from flat RL)
-        self.state = FlatRLState(data_handler, max_jobs, max_machines)
+        self.state = State(data_handler, max_jobs, max_machines)
         
         # Access state properties through state manager
         self.data_handler = data_handler

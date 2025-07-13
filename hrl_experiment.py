@@ -16,51 +16,9 @@ os.environ["WANDB_DIR"] = training_process_dir
 
 # Configure wandb settings
 os.environ["WANDB_PROJECT"] = "Hierarchical-Job-Shop-RL"
-os.environ["WANDB_SILENT"] = "true"  # Reduce wandb output verbosity
 
 
-def test_environment_setup():
-    """Test basic hierarchical environment setup."""
-    print("\nTesting hierarchical environment setup...")
-    
-    try:
-        # Create a minimal test environment
-        test_params = {
-            'num_jobs': 2, 
-            'num_machines': 2,
-            'operation_lb': 1,
-            'operation_ub': 2,
-            'processing_time_lb': 1,
-            'processing_time_ub': 3,   
-            'compatible_machines_lb': 1,
-            'compatible_machines_ub': 2,
-            'seed': 42,
-        }
-        
-        data_handler = FlexibleJobShopDataHandler(data_source=test_params, data_type="simulation")
-        env = HierarchicalRLEnv(data_handler, alpha=0.0)
-        
-        # Test basic environment functions
-        obs, _ = env.reset()
-        print(f"✓ Environment reset successful, obs shape: {obs.shape}")
-        
-        action_mask = env.get_action_mask()
-        print(f"✓ Action mask generated, valid actions: {action_mask.sum().item()}")
-        
-        if action_mask.any():
-            valid_action = int(torch.where(action_mask)[0][0].item())
-            obs, reward, terminated, truncated, info = env.step(valid_action)
-            print(f"✓ Environment step successful, reward: {reward:.2f}")
-        
-        
-        print("✓ Hierarchical environment test passed")
-        return True
-        
-    except Exception as e:
-        print(f"✗ Hierarchical environment test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+
 
 def main():
     
@@ -68,10 +26,7 @@ def main():
     print("🏗️  HIERARCHICAL REINFORCEMENT LEARNING EXPERIMENT")
     print("📋 Manager-Worker Architecture for Job Shop Scheduling")
     print("="*60)
-    
-    if not test_environment_setup():
-        print("\nHierarchical environment test failed! Exiting.")
-        return
+        
     
     print("\n" + "="*50)
     print("Starting hierarchical RL experiment...")
@@ -98,14 +53,13 @@ def main():
     total_max_steps = simulation_params['num_jobs'] * simulation_params['operation_ub'] * simulation_params['num_machines']
     hrl_params = {
         'alpha': 0.5,
-        'epochs': 300,  # Fewer epochs than flat RL as hierarchical might converge faster
+        'epochs': 800,  # Fewer epochs than flat RL as hierarchical might converge faster
         'steps_per_epoch': total_max_steps,
         'dilation': 10,  # Manager horizon c
         'latent_dim': 256,  # Encoded state dimension
         'goal_dim': 32,  # Goal space dimension
-        'hidden_dim': 512,  # Network hidden dimension
-        'manager_lr': 3e-4,  # Manager learning rate
-        'worker_lr': 3e-4,  # Worker learning rate
+        'manager_lr': 1e-5,  # Manager learning rate
+        'worker_lr': 1e-5,  # Worker learning rate
         'alpha_start': 1.0,  # Initial intrinsic reward weight
         'alpha_end': 0.1,  # Final intrinsic reward weight
         'gamma_manager': 0.995,  # Manager discount factor
@@ -135,7 +89,6 @@ def main():
         dilation=hrl_params['dilation'],
         latent_dim=hrl_params['latent_dim'],
         goal_dim=hrl_params['goal_dim'],
-        hidden_dim=hrl_params['hidden_dim'],
         manager_lr=hrl_params['manager_lr'],
         worker_lr=hrl_params['worker_lr'],
         alpha_start=hrl_params['alpha_start'],
@@ -187,7 +140,6 @@ def main():
             manager_hidden = None
             goals_history = []
             encoded_states_history = []
-            prev_r_int = 0.0
             
             episode_reward = 0
             step = 0
@@ -200,12 +152,12 @@ def main():
                 
                 # Manager decision
                 if step % trainer.dilation == 0:
-                    goal, _, manager_hidden = trainer.agent.get_manager_goal(z_t, step, manager_hidden)
+                    goal, _ = trainer.agent.get_manager_goal(z_t)
                     if goal is not None:
                         goals_history.append(goal)
                 
                 # Pool goals for worker
-                pooled_goal = trainer.agent.pool_goals(goals_history, step)
+                pooled_goal = trainer.agent.pool_goals(goals_history, step, trainer.agent.goal_duration)
                 
                 # Worker action (deterministic)
                 action_mask = env.get_action_mask()
@@ -213,7 +165,7 @@ def main():
                     break
                 
                 action = trainer.agent.get_deterministic_action(
-                    obs, action_mask, pooled_goal, prev_r_int
+                    obs, action_mask, pooled_goal
                 )
                 
                 # Environment step

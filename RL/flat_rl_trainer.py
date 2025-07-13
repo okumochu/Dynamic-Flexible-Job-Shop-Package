@@ -30,7 +30,6 @@ class FlatRLTrainer:
                  train_pi_iters: int = 80, # default 80
                  train_v_iters: int = 80, # default 80
                  target_kl: float = 0.1,  # default 0.01
-                 hidden_dim: int = 128,
                  pi_lr: float = 3e-5, # default 3e-4
                  v_lr: float = 1e-4, # default 1e-3
                  gamma: float = 0.99,
@@ -43,7 +42,6 @@ class FlatRLTrainer:
         
         Args:
             env: The environment to train on
-            hidden_dim: Hidden layer dimension for networks
             pi_lr: Policy learning rate
             v_lr: Value function learning rate
             gamma: Discount factor
@@ -83,7 +81,6 @@ class FlatRLTrainer:
         self.agent = FlatAgent(
             input_dim=obs_dim,
             action_dim=action_dim,
-            hidden_dim=hidden_dim,
             pi_lr=pi_lr,
             v_lr=v_lr,
             gamma=gamma,
@@ -116,7 +113,6 @@ class FlatRLTrainer:
             config={
                 "steps_per_epoch": self.steps_per_epoch,
                 "epochs": self.epochs,
-                "hidden_dim": self.agent.policy.backbone[0].out_features,
                 "pi_lr": self.agent.pi_lr,
                 "v_lr": self.agent.v_lr,
                 "gamma": self.agent.gamma,
@@ -188,7 +184,7 @@ class FlatRLTrainer:
             })
         training_time = time.time() - start_time
         pbar.close()
-        self.save_model("final_model.pth")
+        self.agent.save(os.path.join(self.model_save_dir, "final_model.pth"))
         wandb.finish()
         return {
             'episode_rewards': self.training_history['episode_rewards'],
@@ -197,21 +193,6 @@ class FlatRLTrainer:
             'training_stats': self.training_history['training_stats'],
             'training_time': training_time
         }
-    
-    def save_model(self, filename: str):
-        """Save the model to file."""
-        filepath = os.path.join(self.model_save_dir, filename)
-        self.agent.save(filepath)
-        print(f"Model saved to {filepath}")
-    
-    def load_model(self, filename: str):
-        """Load the model from file."""
-        filepath = os.path.join(self.model_save_dir, filename)
-        if os.path.exists(filepath):
-            self.agent.load(filepath)
-            print(f"Model loaded from {filepath}")
-        else:
-            print(f"Model file {filepath} not found")
     
     def evaluate(self) -> Dict:
         """

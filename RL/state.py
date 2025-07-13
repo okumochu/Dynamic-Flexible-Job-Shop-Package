@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 from benchmarks.static_benchmark.jobshop_components import Job
 
-class FlatRLState:
+class State:
     """
     State management class for Flat RL Environment.
     

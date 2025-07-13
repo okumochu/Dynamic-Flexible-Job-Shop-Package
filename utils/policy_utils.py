@@ -23,7 +23,6 @@ def load_flat_agent(model_dir, env):
         agent = FlatAgent(
             input_dim=config['input_dim'],
             action_dim=config['action_dim'],
-            hidden_dim=config['hidden_dim'],
             pi_lr=config.get('pi_lr', 3e-4),
             v_lr=config.get('v_lr', 3e-4),
             gamma=config['gamma'],
@@ -40,7 +39,6 @@ def load_flat_agent(model_dir, env):
         agent = FlatAgent(
             input_dim=input_dim,
             action_dim=action_dim,
-            hidden_dim=128,
             pi_lr=3e-4,
             v_lr=3e-4,
             gamma=0.99,
@@ -74,8 +72,7 @@ def load_hierarchical_agent(model_dir, env):
             action_dim=config['action_dim'],
             latent_dim=config['latent_dim'],
             goal_dim=config['goal_dim'],
-            hidden_dim=config['hidden_dim'],
-            dilation=config['dilation'],
+            goal_duration=config['dilation'],  # Map dilation to goal_duration
             manager_lr=config['manager_lr'],
             worker_lr=config['worker_lr'],
             gamma_manager=config['gamma_manager'],
@@ -97,8 +94,7 @@ def load_hierarchical_agent(model_dir, env):
             action_dim=action_dim,
             latent_dim=256,
             goal_dim=32,
-            hidden_dim=512,
-            dilation=10,
+            goal_duration=10,  # Use goal_duration instead of dilation
             manager_lr=3e-4,
             worker_lr=3e-4,
             gamma_manager=0.995,
@@ -238,7 +234,6 @@ def showcase_hierarchical_policy(model_dir, env):
     manager_hidden = None
     goals_history = []
     encoded_states_history = []
-    prev_r_int = 0.0
     
     total_reward = 0
     step_count = 0
@@ -249,14 +244,14 @@ def showcase_hierarchical_policy(model_dir, env):
         z_t = agent.encode_state(obs)
         encoded_states_history.append(z_t)
         
-        # Manager decision (every dilation steps)
-        if step_count % agent.dilation == 0:
-            goal, _, manager_hidden = agent.get_manager_goal(z_t, step_count, manager_hidden)
+        # Manager decision (every goal_duration steps)
+        if step_count % agent.goal_duration == 0:
+            goal, _ = agent.get_manager_goal(z_t)
             if goal is not None:
                 goals_history.append(goal)
         
         # Pool goals for worker
-        pooled_goal = agent.pool_goals(goals_history, step_count)
+        pooled_goal = agent.pool_goals(goals_history, step_count, agent.goal_duration)
         
         # Worker action (deterministic)
         action_mask = env.get_action_mask()
@@ -265,7 +260,7 @@ def showcase_hierarchical_policy(model_dir, env):
             break
         
         action = agent.get_deterministic_action(
-            obs, action_mask, pooled_goal, prev_r_int
+            obs, action_mask, pooled_goal
         )
         
         # Decode action to get job and machine
@@ -287,11 +282,11 @@ def showcase_hierarchical_policy(model_dir, env):
         total_reward += reward
         step_count += 1
         
-        # Compute intrinsic reward for next step
-        if len(encoded_states_history) > 1:
-            prev_r_int = agent.compute_intrinsic_reward(
-                encoded_states_history, goals_history, step_count - 1
-            )
+        # Compute intrinsic reward for next step (no longer used)
+        # if len(encoded_states_history) > 1:
+        #     prev_r_int = agent.compute_intrinsic_reward(
+        #         encoded_states_history, goals_history, step_count - 1
+        #     )
         
         # Calculate operation_id (assuming sequential numbering)
         operation_id = sum(len(env.jobs[j].operations) for j in range(job_id)) + op_idx

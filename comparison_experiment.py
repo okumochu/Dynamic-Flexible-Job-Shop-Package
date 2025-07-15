@@ -7,7 +7,7 @@ import os
 import torch
 import time
 import matplotlib.pyplot as plt
-from RL.flat_rl_env import FlatRLEnv
+from RL.rl_env import RLEnv
 from RL.flat_rl_trainer import FlatRLTrainer
 from MILP.model import MILP
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
@@ -76,7 +76,7 @@ class ComparisonExperiment:
         
         try:
             # Create environment
-            env = FlatRLEnv(data_handler, alpha=self.rl_params['alpha'])
+            env = RLEnv(data_handler, alpha=self.rl_params['alpha'])
             print(f"Environment created: {env.num_jobs} jobs, {env.num_machines} machines")
             print(f"Observation dimension: {env.obs_len}, Action dimension: {env.action_dim}")
             

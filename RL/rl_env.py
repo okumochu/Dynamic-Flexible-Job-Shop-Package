@@ -1,6 +1,7 @@
 """
-HierarchicalRLEnv: Event-driven Hierarchical RL Environment for Flexible Job Shop Scheduling
-Implements OpenAI Gym API for hierarchical RL with Manager-Worker architecture
+RLEnv: Unified Event-driven Flexible Job Shop Scheduling Environment
+Implements OpenAI Gym API for multi-objective optimization (Makespan + TWT)
+Compatible with both flat and hierarchical RL algorithms
 """
 
 import torch
@@ -11,28 +12,35 @@ from gymnasium import spaces
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 from RL.state import State
 
-class HierarchicalRLEnv(gym.Env):
+class RLEnv(gym.Env):
     """
-    Event-driven Hierarchical RL Environment for Flexible Job Shop Scheduling.
+    Unified Event-driven Flexible Job Shop Scheduling Environment.
     
-    Similar to FlatRLEnv but designed for hierarchical RL with Manager-Worker architecture.
-    Uses the same state management as FlatRLEnv but provides additional functionality
-    for hierarchical goal management and intrinsic rewards.
+    The environment simulates a flexible job shop where:
+    - Each job has multiple operations that must be processed in order
+    - Each operation can be processed on multiple compatible machines
+    - The agent dispatches operations to machines
+    - Time advances to the next completion event after each dispatch
+    - Objectives: minimize makespan and total weighted tardiness
+    
+    Compatible with both flat and hierarchical RL algorithms.
     """
     
-    def __init__(self, data_handler, alpha: float, max_jobs: Optional[int] = None, max_machines: Optional[int] = None):
+    def __init__(self, data_handler, alpha: float, max_jobs: Optional[int] = None, 
+                 max_machines: Optional[int] = None, detailed_info: bool = False):
         """
-        Initialize the hierarchical environment.
+        Initialize the environment.
         
         Args:
             data_handler: FlexibleJobShopDataHandler instance
             alpha: Weight for TWT in reward
             max_jobs: Maximum jobs for padding (default: num_jobs)
             max_machines: Maximum machines for padding (default: num_machines)
+            detailed_info: Whether to include detailed step information (useful for hierarchical RL)
         """
         super().__init__()
         
-        # Initialize state manager (reuse from flat RL)
+        # Initialize state manager
         self.state = State(data_handler, max_jobs, max_machines)
         
         # Access state properties through state manager
@@ -46,6 +54,7 @@ class HierarchicalRLEnv(gym.Env):
         self.max_jobs = self.state.job_dim
         self.max_machines = self.state.machine_dim
         self.action_dim = self.state.action_dim
+        self.detailed_info = detailed_info
         
         # Initialize state and get obs_len
         self.state.reset()
@@ -55,7 +64,7 @@ class HierarchicalRLEnv(gym.Env):
         self.observation_space = spaces.Box(low=0, high=1, shape=(self.obs_len,), dtype=np.float32)
         self.last_objective = 0
         
-        # Hierarchical-specific tracking
+        # Optional tracking for detailed info (useful for hierarchical RL)
         self.step_count = 0
         self.episode_steps = []
         
@@ -80,7 +89,7 @@ class HierarchicalRLEnv(gym.Env):
             reward: Reward for this step
             terminated: Whether episode is finished (natural)
             truncated: Whether episode is truncated (never in this env)
-            info: Additional information including hierarchical metrics
+            info: Additional information (detailed if requested)
         """
         terminated = False
         truncated = False
@@ -121,16 +130,17 @@ class HierarchicalRLEnv(gym.Env):
             terminated = True
             truncated = True
 
-        # Add hierarchical-specific info
-        objective_info.update({
-            'step_count': self.step_count,
-            'job_id': job_id,
-            'machine_id': machine_id,
-            'operation_id': op_idx,
-            'start_time': start_time,
-            'finish_time': finish_time,
-            'processing_time': proc_time
-        })
+        # Add detailed info if requested (useful for hierarchical RL)
+        if self.detailed_info:
+            objective_info.update({
+                'step_count': self.step_count,
+                'job_id': job_id,
+                'machine_id': machine_id,
+                'operation_id': op_idx,
+                'start_time': start_time,
+                'finish_time': finish_time,
+                'processing_time': proc_time
+            })
 
         return obs, reward, terminated, truncated, objective_info
     
@@ -188,4 +198,3 @@ class HierarchicalRLEnv(gym.Env):
             'twt': twt,
             'objective': (1 - self.alpha) * makespan + self.alpha * twt
         }
-    

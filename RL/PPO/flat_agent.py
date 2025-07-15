@@ -3,8 +3,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 import numpy as np
-from networks import PolicyNetwork, ValueNetwork
-from buffer import PPOBuffer
+from RL.PPO.networks import PolicyNetwork, ValueNetwork, PPOUpdater
+from RL.PPO.buffer import PPOBuffer
 from typing import Tuple
 
 class FlatAgent:
@@ -70,28 +70,6 @@ class FlatAgent:
             value = self.value(obs)
             return int(action.item()), float(log_prob.item()), float(value.item())
     
-    def compute_gae_advantages(self, rewards, values, dones):
-        """
-        Compute GAE advantages and returns.
-        Returns:
-            advantages: GAE advantages
-            returns: advantages + values (targets for value function)
-        """
-        advantages = torch.zeros_like(rewards)
-        gae = 0
-        for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_value = 0
-            else:
-                next_value = values[t + 1]
-            not_done = 1.0 - dones[t].float()
-            delta = rewards[t] + self.gamma * next_value * not_done - values[t]
-            gae = delta + self.gamma * self.gae_lambda * not_done * gae
-            advantages[t] = gae
-        
-        returns = advantages + values
-        return advantages, returns
-    
     def update(self, buffer: PPOBuffer, train_pi_iters: int, train_v_iters: int, target_kl: float):
         """
         Update PPO agent using buffer.
@@ -104,7 +82,12 @@ class FlatAgent:
             stats: dict with losses, clip_fraction, kl
         """
         batch = buffer.get_batch()
-        advantages, returns = self.compute_gae_advantages(batch['rewards'], batch['values'], batch['dones'])
+        
+        # Compute GAE advantages using PPOUpdater
+        advantages, returns = PPOUpdater.compute_gae_advantages(
+            batch['rewards'], batch['values'], batch['dones'], 
+            self.gamma, self.gae_lambda
+        )
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
 
@@ -123,20 +106,14 @@ class FlatAgent:
             masked_logits[~batch['action_masks']] = float('-inf')
             dist = Categorical(logits=masked_logits)
             new_log_probs = dist.log_prob(batch['actions'])
-            entropy = dist.entropy().mean()
+            
+            # Compute entropy using PPOUpdater
+            entropy = PPOUpdater.compute_entropy(action_logits, batch['action_masks'])
 
-
-            # clip 
-            """
-            ratio = π_new(a|s) / π_old(a|s)
-                = exp(log π_new(a|s)) / exp(log π_old(a|s))
-                = exp(log π_new(a|s) - log π_old(a|s))
-                = exp(new_log_probs - old_log_probs)
-            """
-            ratio = torch.exp(new_log_probs - batch['log_probs'])
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
+            # PPO policy loss using PPOUpdater
+            policy_loss = PPOUpdater.ppo_policy_loss(
+                new_log_probs, batch['log_probs'], advantages, self.clip_ratio
+            )
             
             # Total policy loss with entropy penalty
             total_policy_loss = policy_loss - self.entropy_coef * entropy

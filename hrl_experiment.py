@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from RL.hierarchical_rl_env import HierarchicalRLEnv
+from RL.rl_env import RLEnv
 from RL.hierarchical_rl_trainer import HierarchicalRLTrainer
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 import wandb
@@ -51,17 +51,18 @@ def main():
     
     # Hierarchical RL specific parameters
     total_max_steps = simulation_params['num_jobs'] * simulation_params['operation_ub'] * simulation_params['num_machines']
+    action_dim = simulation_params['num_jobs'] * simulation_params['num_machines']
     hrl_params = {
         'alpha': 0.5,
         'epochs': 800,  # Fewer epochs than flat RL as hierarchical might converge faster
         'steps_per_epoch': total_max_steps,
-        'dilation': 10,  # Manager horizon c
-        'latent_dim': 256,  # Encoded state dimension
-        'goal_dim': 32,  # Goal space dimension
+        'goal_duration': total_max_steps//4,  # Manager horizon c
+        'latent_dim': 128,  # Encoded state dimension
+        'goal_dim': action_dim//10,  # Goal space dimension
         'manager_lr': 1e-5,  # Manager learning rate
         'worker_lr': 1e-5,  # Worker learning rate
         'alpha_start': 1.0,  # Initial intrinsic reward weight
-        'alpha_end': 0.1,  # Final intrinsic reward weight
+        'alpha_end': 1.0,  # Final intrinsic reward weight
         'gamma_manager': 0.995,  # Manager discount factor
         'gamma_worker': 0.95,   # Worker discount factor
         'gae_lambda': 0.95,
@@ -72,12 +73,12 @@ def main():
     
     print("Creating data handler and hierarchical environment...")
     data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
-    env = HierarchicalRLEnv(data_handler, alpha=hrl_params['alpha'])
+    env = RLEnv(data_handler, alpha=hrl_params['alpha'], detailed_info=True)
     
     print(f"Hierarchical environment created: {env.num_jobs} jobs, {env.num_machines} machines")
     print(f"Observation dimension: {env.obs_len}")
     print(f"Action dimension: {env.action_dim}")
-    print(f"Manager dilation: {hrl_params['dilation']}")
+    print(f"Manager goal duration: {hrl_params['goal_duration']}")
     print(f"Latent dimension: {hrl_params['latent_dim']}")
     print(f"Goal dimension: {hrl_params['goal_dim']}")
     
@@ -86,7 +87,7 @@ def main():
         env=env,
         epochs=hrl_params['epochs'],
         steps_per_epoch=hrl_params['steps_per_epoch'],
-        dilation=hrl_params['dilation'],
+        goal_duration=hrl_params['goal_duration'],
         latent_dim=hrl_params['latent_dim'],
         goal_dim=hrl_params['goal_dim'],
         manager_lr=hrl_params['manager_lr'],
@@ -151,7 +152,7 @@ def main():
                 encoded_states_history.append(z_t)
                 
                 # Manager decision
-                if step % trainer.dilation == 0:
+                if step % trainer.goal_duration == 0:
                     goal, _ = trainer.agent.get_manager_goal(z_t)
                     if goal is not None:
                         goals_history.append(goal)
@@ -217,7 +218,7 @@ def main():
         print("HIERARCHICAL RL EXPERIMENT SUMMARY")
         print("="*50)
         print(f"Manager-Worker Architecture:")
-        print(f"  Dilation (c): {hrl_params['dilation']}")
+        print(f"  Goal Duration (c): {hrl_params['goal_duration']}")
         print(f"  Latent Dimension: {hrl_params['latent_dim']}")
         print(f"  Goal Dimension: {hrl_params['goal_dim']}")
         print(f"  Manager LR: {hrl_params['manager_lr']}")

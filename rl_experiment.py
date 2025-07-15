@@ -1,6 +1,6 @@
 import os
 import torch
-from RL.flat_rl_env import FlatRLEnv
+from RL.rl_env import RLEnv
 from RL.flat_rl_trainer import FlatRLTrainer
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 import wandb
@@ -50,7 +50,7 @@ def main():
     
     print("Creating data handler and environment...")
     data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
-    env = FlatRLEnv(data_handler, alpha=rl_params['alpha'])
+    env = RLEnv(data_handler, alpha=rl_params['alpha'])
     
     print(f"Environment created: {env.num_jobs} jobs, {env.num_machines} machines")
     print(f"Observation dimension: {env.obs_len}")

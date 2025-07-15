@@ -15,7 +15,7 @@ from gymnasium import spaces
 import wandb
 from RL.PPO.flat_agent import FlatAgent
 from RL.PPO.buffer import PPOBuffer
-from RL.flat_rl_env import FlatRLEnv
+from RL.rl_env import RLEnv
 
 class FlatRLTrainer:
     """
@@ -24,7 +24,7 @@ class FlatRLTrainer:
     """
     
     def __init__(self, 
-                 env: FlatRLEnv,
+                 env: RLEnv,
                  epochs: int, 
                  steps_per_epoch: int = 4000, # default 4000
                  train_pi_iters: int = 80, # default 80

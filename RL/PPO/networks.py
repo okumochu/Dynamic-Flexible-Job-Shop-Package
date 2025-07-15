@@ -2,6 +2,63 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from torch.distributions import Categorical
+from typing import Dict, Tuple
+
+"""
+PPO Update Class for code reuse
+"""
+
+class PPOUpdater:
+    """
+    Common PPO update logic for both flat and hierarchical agents.
+    """
+    
+    @staticmethod
+    def compute_gae_advantages(rewards, values, dones, gamma, gae_lambda):
+        """
+        Compute GAE advantages and returns.
+        Returns:
+            advantages: GAE advantages
+            returns: advantages + values (targets for value function)
+        """
+        advantages = torch.zeros_like(rewards)
+        gae = 0
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value = 0
+            else:
+                next_value = values[t + 1]
+            not_done = 1.0 - dones[t].float()
+            delta = rewards[t] + gamma * next_value * not_done - values[t]
+            gae = delta + gamma * gae_lambda * not_done * gae
+            advantages[t] = gae
+        
+        returns = advantages + values
+        return advantages, returns
+    
+    @staticmethod
+    def ppo_policy_loss(new_log_probs, old_log_probs, advantages, clip_ratio):
+        """
+        Compute PPO clipped policy loss.
+        """
+        ratio = torch.exp(new_log_probs - old_log_probs)
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * advantages
+        return -torch.min(surr1, surr2).mean()
+    
+    @staticmethod
+    def compute_entropy(logits, action_mask=None):
+        """
+        Compute entropy for policy regularization.
+        """
+        if action_mask is not None:
+            masked_logits = logits.clone()
+            masked_logits[~action_mask] = float('-inf')
+            dist = Categorical(logits=masked_logits)
+        else:
+            dist = Categorical(logits=logits)
+        return dist.entropy().mean()
 
 
 """
@@ -86,8 +143,8 @@ class PerceptualEncoder(nn.Module):
         return z
 
 
-class MLPManager(nn.Module):
-    """Simple MLP Manager that emits unit-norm goal vectors"""
+class ManagerPolicy(nn.Module):
+    """Manager policy network that emits unit-norm goal vectors (policy only)"""
     
     def __init__(self, latent_dim: int, hidden_dim: int = 128):
         super().__init__()
@@ -100,15 +157,6 @@ class MLPManager(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, latent_dim)
-        )
-        
-        # Value function for manager
-        self.value_network = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
         )
         
         # Initialize weights
@@ -126,20 +174,16 @@ class MLPManager(nn.Module):
             z: [batch_size, latent_dim] = encoded state
         Returns:
             goals: [batch_size, latent_dim] = unit-norm goal vectors
-            values: [batch_size, 1] = value estimates
         """
         # Generate goals
         raw_goals = self.policy_network(z)
         goals = F.normalize(raw_goals, p=2, dim=-1)  # Unit-norm goal vectors
         
-        # Generate values
-        values = self.value_network(z)  # [batch_size, 1]
-        
-        return goals, values
+        return goals
 
 
-class HierarchicalWorker(nn.Module):
-    """Worker that combines PPO with goal-conditioned policy"""
+class WorkerPolicy(nn.Module):
+    """Worker policy network that combines PPO with goal-conditioned policy (policy only)"""
     
     def __init__(self, latent_dim: int, action_dim: int, 
                  goal_dim: int, hidden_dim: int = 128):
@@ -151,26 +195,13 @@ class HierarchicalWorker(nn.Module):
         # Goal processing (bias-free as specified)
         self.goal_transform = nn.Linear(latent_dim, goal_dim, bias=False)
         
-        # Action embedding matrix U ∈ R^{|A| × k}
-        self.action_embedding = nn.Parameter(torch.randn(action_dim, goal_dim))
-        nn.init.xavier_uniform_(self.action_embedding)
-        
-        # Policy network backbone
-        input_dim = latent_dim + goal_dim  # z_t + pooled_goals
+        # Policy network outputs action-goal compatibility matrix
         self.policy_backbone = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(latent_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, action_dim)  # Direct output to action_dim
-        )
-
-        self.value_network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, action_dim * goal_dim)  # Output |A| × k logits
         )
         
         # Initialize weights
@@ -181,34 +212,32 @@ class HierarchicalWorker(nn.Module):
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
-                nn.init.constant_(module.bias, 0)
+                if module.bias is not None:  # Only initialize bias if it exists
+                    nn.init.constant_(module.bias, 0)
     
     def forward(self, z_t, pooled_goals):
         """
         Args:
             z_t: [batch_size, latent_dim] = encoded state
             pooled_goals: [batch_size, latent_dim] = pooled manager goals
+        Returns:
+            action_probs: [batch_size, action_dim] = action probabilities
         """
         
         # Transform pooled goals to worker space
         w_t = self.goal_transform(pooled_goals)  # [batch_size, goal_dim]
         
-        # Combine inputs
-        policy_input = torch.cat([z_t, w_t], dim=-1)
+        # Policy network outputs action-goal compatibility matrix
+        action_goal_logits = self.policy_backbone(z_t)  # [batch_size, action_dim * goal_dim]
         
-        # Policy backbone for basic logits
-        policy_logits = self.policy_backbone(policy_input)  # [batch_size, action_dim]
+        # Reshape to [batch_size, action_dim, goal_dim]
+        action_goal_matrix = action_goal_logits.view(-1, self.action_dim, self.goal_dim)
         
-        # Compute action logits using goal-action embedding (simplified)
-        action_contributions = torch.matmul(w_t, self.action_embedding.T)  # [batch_size, action_dim]
-        
-        # Final action logits
-        action_logits = policy_logits + action_contributions
+        # Matrix multiplication: [batch_size, action_dim, goal_dim] @ [batch_size, goal_dim, 1]
+        # -> [batch_size, action_dim]
+        action_logits = torch.bmm(action_goal_matrix, w_t.unsqueeze(-1)).squeeze(-1)
         
         # Policy distribution
         action_probs = F.softmax(action_logits, dim=-1)
         
-        # Value estimate
-        value = self.value_network(policy_input)
-        
-        return action_probs, value
+        return action_probs

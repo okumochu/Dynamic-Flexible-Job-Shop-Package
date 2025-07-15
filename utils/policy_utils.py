@@ -58,53 +58,28 @@ def load_hierarchical_agent(model_dir, env):
     Returns the loaded agent.
     """
     model_path = os.path.join(model_dir, "final_model.pth")
+    config = HierarchicalAgent.get_saved_config(model_path)
+    print(f"Loaded hierarchical configuration from saved model:")
+    for key, value in config.items():
+        print(f"  {key}: {value}")
     
-    # Try to load configuration from saved model
-    try:
-        config = HierarchicalAgent.get_saved_config(model_path)
-        print(f"Loaded hierarchical configuration from saved model:")
-        for key, value in config.items():
-            print(f"  {key}: {value}")
-        
-        # Create hierarchical agent with saved configuration
-        agent = HierarchicalAgent(
-            input_dim=config['input_dim'],
-            action_dim=config['action_dim'],
-            latent_dim=config['latent_dim'],
-            goal_dim=config['goal_dim'],
-            goal_duration=config['dilation'],  # Map dilation to goal_duration
-            manager_lr=config['manager_lr'],
-            worker_lr=config['worker_lr'],
-            gamma_manager=config['gamma_manager'],
-            gamma_worker=config['gamma_worker'],
-            gae_lambda=config['gae_lambda'],
-            clip_ratio=config['clip_ratio'],
-            entropy_coef=config['entropy_coef'],
-            epsilon_greedy=config['epsilon_greedy'],
-            device=config['device']
-        )
-    except Exception as e:
-        print(f"Could not load configuration from model: {e}")
-        print("Falling back to environment-based configuration...")
-        # Fallback to environment-based configuration
-        input_dim = env.obs_len
-        action_dim = int(env.action_space.n)
-        agent = HierarchicalAgent(
-            input_dim=input_dim,
-            action_dim=action_dim,
-            latent_dim=256,
-            goal_dim=32,
-            goal_duration=10,  # Use goal_duration instead of dilation
-            manager_lr=3e-4,
-            worker_lr=3e-4,
-            gamma_manager=0.995,
-            gamma_worker=0.95,
-            gae_lambda=0.95,
-            clip_ratio=0.2,
-            entropy_coef=0.01,
-            epsilon_greedy=0.1,
-            device='auto'
-        )
+    # Create hierarchical agent with saved configuration
+    agent = HierarchicalAgent(
+        input_dim=config['input_dim'],
+        action_dim=config['action_dim'],
+        latent_dim=config['latent_dim'],
+        goal_dim=config['goal_dim'],
+        goal_duration=config['goal_duration'],
+        manager_lr=config['manager_lr'],
+        worker_lr=config['worker_lr'],
+        gamma_manager=config['gamma_manager'],
+        gamma_worker=config['gamma_worker'],
+        gae_lambda=config['gae_lambda'],
+        clip_ratio=config['clip_ratio'],
+        entropy_coef=config['entropy_coef'],
+        epsilon_greedy=config['epsilon_greedy'],
+        device=config['device']
+    )
     
     # Load the trained model
     agent.load(model_path)
@@ -415,40 +390,3 @@ def create_gantt_chart(result, save_path=None, title_suffix=""):
     except Exception as e:
         print(f"Error creating Gantt chart: {e}")
         return None
-
-
-# Backward compatibility classes (can be removed later)
-class PolicyShowcaser:
-    def __init__(self, model_dir, env):
-        self.model_dir = model_dir
-        self.env = env
-    
-    def showcase(self, render_gantt=True, gantt_save_path=None):
-        result = showcase_flat_policy(self.model_dir, self.env)
-        
-        if render_gantt:
-            create_gantt_chart(result, save_path=gantt_save_path, title_suffix="Flat RL")
-        
-        return result
-    
-    def plot_gantt(self, schedule_info, save_path=None):
-        # This method is deprecated, use create_gantt_chart instead
-        return create_gantt_chart(schedule_info, save_path=save_path)
-
-
-class HierarchicalPolicyShowcaser:
-    def __init__(self, model_dir, env):
-        self.model_dir = model_dir
-        self.env = env
-    
-    def showcase(self, render_gantt=True, gantt_save_path=None):
-        result = showcase_hierarchical_policy(self.model_dir, self.env)
-        
-        if render_gantt:
-            create_gantt_chart(result, save_path=gantt_save_path, title_suffix="Hierarchical RL")
-        
-        return result
-    
-    def plot_gantt(self, schedule_info, save_path=None):
-        # This method is deprecated, use create_gantt_chart instead
-        return create_gantt_chart(schedule_info, save_path=save_path, title_suffix="Hierarchical RL")

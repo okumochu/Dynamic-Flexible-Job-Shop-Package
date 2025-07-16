@@ -109,6 +109,7 @@ class FlatRLTrainer:
         """
         buffer = PPOBuffer(self.steps_per_epoch, (self.env.obs_len,), self.env.action_dim, self.agent.device)
         wandb.init(
+            name=f"experiment_{time.strftime('%Y%m%d_%H%M')}",
             project="Flexible-Job-Shop-RL",
             config={
                 "steps_per_epoch": self.steps_per_epoch,

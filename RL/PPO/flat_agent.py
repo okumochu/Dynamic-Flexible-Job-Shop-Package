@@ -45,7 +45,6 @@ class FlatAgent:
             'policy_loss': [],
             'value_loss': [],
             'entropy_loss': [],
-            'total_loss': [],
             'clip_fraction': [],
             'kl': []
         }
@@ -143,7 +142,6 @@ class FlatAgent:
             'policy_loss': float(policy_loss.item()),
             'value_loss': float(value_loss.item()),
             'entropy': float(entropy.item()),
-            'total_loss': float(total_policy_loss.item() + value_loss.item()),
             'kl': float(approx_kl)
         }
         for k in stats:

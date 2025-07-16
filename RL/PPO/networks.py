@@ -144,7 +144,7 @@ class PerceptualEncoder(nn.Module):
 
 
 class ManagerPolicy(nn.Module):
-    """Manager policy network that emits unit-norm goal vectors (policy only)"""
+    """Manager policy network that emits unit-norm goal vectors"""
     
     def __init__(self, latent_dim: int, hidden_dim: int = 128):
         super().__init__()

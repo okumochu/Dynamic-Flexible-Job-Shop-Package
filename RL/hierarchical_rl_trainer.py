@@ -15,9 +15,7 @@ from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import wandb
-
-# Import from restructured modules
-from RL.PPO.buffer import PPOBuffer, HierarchicalBuffer
+from RL.PPO.buffer import PPOBuffer, HierarchicalPPOBuffer
 from RL.PPO.hierarichical_agent import HierarchicalAgent
 from RL.rl_env import RLEnv
 
@@ -41,7 +39,6 @@ class HierarchicalRLTrainer:
                  gae_lambda: float,
                  clip_ratio: float,
                  entropy_coef: float ,
-                 epsilon_greedy: float,  # Manager exploration
                  device: str = 'auto',
                  model_save_dir: str = 'result/hierarchical_rl/model'):
         
@@ -67,7 +64,6 @@ class HierarchicalRLTrainer:
             gae_lambda=gae_lambda,
             clip_ratio=clip_ratio,
             entropy_coef=entropy_coef,
-            epsilon_greedy=epsilon_greedy,
             device=device
         )
         
@@ -89,6 +85,7 @@ class HierarchicalRLTrainer:
     def train(self):
         """Main training loop"""
         wandb.init(
+            name=f"experiment_{time.strftime('%Y%m%d_%H%M')}",
             project="Hierarchical-Job-Shop-RL",
             config={
                 "epochs": self.epochs,
@@ -110,8 +107,8 @@ class HierarchicalRLTrainer:
             self.steps_per_epoch, (self.env.obs_len,), self.env.action_dim, self.agent.device
         )
         
-        # Use HierarchicalBuffer for hierarchical data collection
-        hierarchical_buffer = HierarchicalBuffer(
+        # Use HierarchicalPPOBuffer for hierarchical data collection
+        hierarchical_buffer = HierarchicalPPOBuffer(
             self.steps_per_epoch, self.agent.latent_dim, self.agent.device
         )
         
@@ -126,10 +123,10 @@ class HierarchicalRLTrainer:
             self.collect_rollouts(buffer, hierarchical_buffer, alpha)
             
             # Get hierarchical data from buffer
-            encoded_states, goals, pooled_goals = hierarchical_buffer.get_data()
+            encoded_states, goals, pooled_goals = hierarchical_buffer.get_hierarchical_data()
             
             # Update both manager and worker using agent methods
-            manager_stats = self.agent.update_manager()
+            manager_stats = self.agent.update_manager(hierarchical_buffer)
             worker_stats = self.agent.update_worker(buffer, encoded_states, goals, pooled_goals)
             
             # Log statistics
@@ -148,7 +145,7 @@ class HierarchicalRLTrainer:
             
             buffer.clear()
             hierarchical_buffer.clear()
-            self.agent.clear_manager_data()
+            self.agent.clear_manager_data(hierarchical_buffer)
         
         training_time = time.time() - start_time
         pbar.close()
@@ -184,11 +181,6 @@ class HierarchicalRLTrainer:
                 # Manager emits new goal
                 goal, manager_value = self.agent.get_manager_goal(z_t)
                 
-                # Add epsilon-greedy exploration to goals
-                if goal is not None and torch.rand(1).item() < self.agent.epsilon_greedy:
-                    goal = torch.randn_like(goal)
-                    goal = F.normalize(goal, p=2, dim=0)
-                
                 current_goal = goal
                 goals_history.append(goal)
                 
@@ -205,6 +197,7 @@ class HierarchicalRLTrainer:
                         
                         # Add manager experience to agent  
                         self.agent.add_manager_experience(
+                            hierarchical_buffer,
                             encoded_states_history[prev_start_step],
                             goals_history[prev_goal_idx],
                             0.0,  # Value will be computed during update
@@ -218,7 +211,7 @@ class HierarchicalRLTrainer:
             
             # Add to hierarchical buffer
             current_goal = goals_history[-1] if goals_history else None
-            hierarchical_buffer.add(z_t, current_goal, pooled_goal, step)
+            hierarchical_buffer.add_hierarchical(z_t, current_goal, pooled_goal, step)
             
             # Worker action using agent
             action_mask = self.env.get_action_mask()
@@ -259,6 +252,7 @@ class HierarchicalRLTrainer:
                     
                     # Add final manager experience
                     self.agent.add_manager_experience(
+                        hierarchical_buffer,
                         encoded_states_history[final_start_step],
                         goals_history[final_goal_idx],
                         0.0,  # Value will be computed during update

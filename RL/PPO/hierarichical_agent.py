@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from typing import Optional, Tuple, Dict, List
 from RL.PPO.networks import PerceptualEncoder, ManagerPolicy, WorkerPolicy, ValueNetwork, PPOUpdater
-from RL.PPO.buffer import PPOBuffer, ManagerBuffer
+from RL.PPO.buffer import PPOBuffer, HierarchicalPPOBuffer
 
 
 class HierarchicalAgent:
@@ -30,7 +30,6 @@ class HierarchicalAgent:
                  gae_lambda: float = 0.95,
                  clip_ratio: float = 0.2,
                  entropy_coef: float = 0.01,
-                 epsilon_greedy: float = 0.1,
                  device: str = 'auto'):
         
         # Set device
@@ -54,32 +53,29 @@ class HierarchicalAgent:
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
         self.entropy_coef = entropy_coef
-        self.epsilon_greedy = epsilon_greedy
         
         # Create models
-        self.encoder = PerceptualEncoder(input_dim, latent_dim).to(self.device)
+        self.manager_encoder = PerceptualEncoder(input_dim, latent_dim).to(self.device)
         self.manager_policy = ManagerPolicy(latent_dim).to(self.device)
         self.manager_value = ValueNetwork(latent_dim).to(self.device)
+
         self.worker_policy = WorkerPolicy(latent_dim, action_dim, goal_dim).to(self.device)
-        # Worker value network takes concatenated state + goal
-        self.worker_value = ValueNetwork(latent_dim + goal_dim).to(self.device)
+        self.worker_value = ValueNetwork(latent_dim).to(self.device)
         
         # Optimizers
-        self.manager_optimizer = optim.Adam(
-            list(self.encoder.parameters()) + list(self.manager_policy.parameters()) + list(self.manager_value.parameters()),
+        self.manager_policy_optimizer = optim.Adam(
+            list(self.manager_encoder.parameters()) + list(self.manager_policy.parameters()),
             lr=manager_lr
         )
-        self.worker_optimizer = optim.Adam(
-            list(self.encoder.parameters()) + list(self.worker_policy.parameters()) + list(self.worker_value.parameters()),
-            lr=worker_lr
+        self.manager_value_optimizer = optim.Adam(
+            list(self.manager_encoder.parameters()) + list(self.manager_value.parameters()),
+            lr=manager_lr
         )
+        self.worker_policy_optimizer = optim.Adam(self.worker_policy.parameters(), lr=worker_lr)
+        self.worker_value_optimizer = optim.Adam(self.worker_value.parameters(), lr=worker_lr)
         
-        # Storage for hierarchical data during training
-        self.manager_buffer = ManagerBuffer(
-            buffer_size=1000,  # Reasonable default buffer size
-            latent_dim=latent_dim,
-            device=self.device
-        )
+        # Remove manager_buffer initialization from here
+        # Buffer will be managed by the trainer
                 
         # Training statistics
         self.training_stats = {
@@ -88,7 +84,6 @@ class HierarchicalAgent:
             'manager_value_loss': [],
             'worker_policy_loss': [],
             'worker_value_loss': [],
-            'worker_total_loss': [],
             'avg_goal_norm': [],
             'avg_cosine_alignment': []
         }
@@ -116,10 +111,8 @@ class HierarchicalAgent:
         action = dist.sample()
         log_prob = dist.log_prob(action)
         
-        # Get value estimate using concatenated state + goal
-        w_t = self.worker_policy.goal_transform(pooled_goals)  # Transform goals to worker space
-        value_input = torch.cat([z_t, w_t], dim=-1)
-        value = self.worker_value(value_input)
+        # Get value estimate
+        value = self.worker_value(z_t)
         
         return action, log_prob, value.squeeze(-1)
     
@@ -132,7 +125,7 @@ class HierarchicalAgent:
             pooled_goals = pooled_goals.unsqueeze(0).to(self.device)
             
             # Encode state
-            z_t = self.encoder(obs)
+            z_t = self.manager_encoder(obs)
             
             # Worker action
             action, log_prob, value = self.get_worker_action_and_value(
@@ -143,14 +136,14 @@ class HierarchicalAgent:
     
     def get_deterministic_action(self, obs: torch.Tensor, action_mask: torch.Tensor,
                                 pooled_goals: torch.Tensor) -> int:
-        """Get deterministic action for evaluation (merged function)"""
+        """Get deterministic action for evaluation"""
         with torch.no_grad():
             obs = obs.unsqueeze(0).to(self.device)
             action_mask = action_mask.to(self.device)
             pooled_goals = pooled_goals.unsqueeze(0).to(self.device)
             
             # Encode state
-            z_t = self.encoder(obs)
+            z_t = self.manager_encoder(obs)
             
             # Worker deterministic action
             action_probs = self.worker_policy(z_t, pooled_goals)
@@ -166,13 +159,13 @@ class HierarchicalAgent:
         """Encode observation to latent space"""
         with torch.no_grad():
             obs = obs.unsqueeze(0).to(self.device)
-            return self.encoder(obs).squeeze(0)
+            return self.manager_encoder(obs).squeeze(0)
     
     def compute_intrinsic_reward(self, encoded_states: List[torch.Tensor], 
                                 goals: List[torch.Tensor], step: int, c: int) -> float:
         """
         Compute intrinsic reward based on goal achievement.
-        For hierarchical RL: r_int = cos(s_t - s_{t-c}, g_{t-c})
+        For hierarchical RL: r_int = avg(cos(s_t - s_{t-c}, g_{t-c}))
         where g_{t-c} is the goal that was active during the period [t-c, t]
         """
         if step < c or step >= len(encoded_states) or len(goals) == 0:
@@ -210,10 +203,10 @@ class HierarchicalAgent:
         
         return goals[goal_idx]
     
-    def add_manager_experience(self, state: torch.Tensor, goal: torch.Tensor, 
+    def add_manager_experience(self, buffer: HierarchicalPPOBuffer, state: torch.Tensor, goal: torch.Tensor, 
                               value: float, reward: float, done: bool):
-        """Add manager experience"""
-        self.manager_buffer.add(state, goal, value, reward, done)
+        """Add manager experience to the provided buffer"""
+        buffer.add_manager(state, goal, value, reward, done)
     
     def compute_manager_reward_with_gradient(self, encoded_states: List[torch.Tensor], 
                                            goals: List[torch.Tensor], goal_idx: int, step: int,
@@ -270,14 +263,14 @@ class HierarchicalAgent:
         """
         return self.compute_manager_reward_with_gradient(encoded_states, goals, goal_idx, step)
     
-    def update_manager(self) -> Dict:
-        """Update manager using transition-policy gradient with proper FuN objective"""
-        if self.manager_buffer.size == 0:
+    def update_manager(self, buffer: HierarchicalPPOBuffer) -> Dict:
+        """Update manager using transition-policy gradient with proper FuN objective, using separate optimizers for policy and value."""
+        if buffer.size == 0:
             return {'loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 
                    'avg_goal_norm': 0.0, 'avg_cosine_alignment': 0.0}
         
         # Get batch from buffer
-        batch = self.manager_buffer.get_batch()
+        batch = buffer.get_manager_batch()
         states = batch['states']
         goals = batch['goals']
         values = batch['values']
@@ -289,27 +282,26 @@ class HierarchicalAgent:
             rewards, values, dones, self.gamma_manager, self.gae_lambda
         )
         
-        # Manager update
-        self.manager_optimizer.zero_grad()
-        
         # Forward pass through manager
         pred_goals = self.manager_policy(states)
         pred_values = self.manager_value(states).squeeze(-1)
         
         # FuN-style policy gradient loss: E[A^M_t · ∇_θ cos(st+c − st, gt)]
-        # This is approximated by: A^M_t · cos_similarity(pred_goals, target_goals)
-        # where target_goals are the goals that led to the advantages
         cosine_alignment = F.cosine_similarity(pred_goals, goals, dim=1)
         policy_loss = -torch.mean(advantages.detach() * cosine_alignment)
         
         # Value loss
         value_loss = F.mse_loss(pred_values, returns)
         
-        # Total loss
-        total_loss = policy_loss + 0.5 * value_loss
+        # --- Update policy ---
+        self.manager_policy_optimizer.zero_grad()
+        policy_loss.backward()
+        self.manager_policy_optimizer.step()
         
-        total_loss.backward()
-        self.manager_optimizer.step()
+        # --- Update value ---
+        self.manager_value_optimizer.zero_grad()
+        value_loss.backward()
+        self.manager_value_optimizer.step()
         
         # Statistics
         with torch.no_grad():
@@ -317,7 +309,7 @@ class HierarchicalAgent:
             avg_cosine_alignment = torch.mean(cosine_alignment).item()
         
         stats = {
-            'loss': total_loss.item(),
+            'loss': (policy_loss.item() + 0.5 * value_loss.item()),
             'policy_loss': policy_loss.item(),
             'value_loss': value_loss.item(),
             'avg_goal_norm': avg_goal_norm,
@@ -335,20 +327,12 @@ class HierarchicalAgent:
                      goals: List[torch.Tensor], pooled_goals: List[torch.Tensor],
                      train_pi_iters: int = 10, train_v_iters: int = 10) -> Dict:
         """
-        Update worker using PPO with mixed rewards (extrinsic + intrinsic).
-        
-        Args:
-            buffer: PPOBuffer containing worker experiences with mixed rewards
-            encoded_states: List of encoded states from the episode
-            goals: List of goals from the episode  
-            pooled_goals: List of pooled goals for each step
-            train_pi_iters: Number of policy iterations
-            train_v_iters: Number of value iterations
+        Update worker using PPO with mixed rewards (extrinsic + intrinsic), using separate optimizers for policy and value.
         """
         worker_data = buffer.get_batch()
         
         if worker_data['observations'].shape[0] == 0:
-            return {'policy_loss': 0.0, 'value_loss': 0.0, 'total_loss': 0.0}
+            return {'policy_loss': 0.0, 'value_loss': 0.0}
         
         # Use the actual rewards from buffer (already contain extrinsic + intrinsic mix)
         worker_rewards = worker_data['rewards']
@@ -359,10 +343,8 @@ class HierarchicalAgent:
         total_value_loss = 0.0
         
         for _ in range(train_pi_iters):
-            self.worker_optimizer.zero_grad()
-            
             # Get batch data
-            batch_encoded_states = self.encoder(worker_data['observations'])
+            batch_encoded_states = self.manager_encoder(worker_data['observations'])
             
             # Use pooled goals for worker 
             batch_pooled_goals = torch.stack(pooled_goals[:batch_size], dim=0)
@@ -398,19 +380,22 @@ class HierarchicalAgent:
             # Value loss
             value_loss = F.mse_loss(values, returns)
             
-            # Total loss
-            total_loss = policy_loss + 0.5 * value_loss
+            # --- Update policy ---
+            self.worker_policy_optimizer.zero_grad()
+            policy_loss.backward(retain_graph=True)
+            self.worker_policy_optimizer.step()
             
-            total_loss.backward()
-            self.worker_optimizer.step()
+            # --- Update value ---
+            self.worker_value_optimizer.zero_grad()
+            value_loss.backward()
+            self.worker_value_optimizer.step()
             
             total_policy_loss += policy_loss.item()
             total_value_loss += value_loss.item()
         
         stats = {
             'policy_loss': total_policy_loss / train_pi_iters,
-            'value_loss': total_value_loss / train_pi_iters,
-            'total_loss': (total_policy_loss + 0.5 * total_value_loss) / train_pi_iters
+            'value_loss': total_value_loss / train_pi_iters
         }
         
         # Update training stats
@@ -420,20 +405,22 @@ class HierarchicalAgent:
         
         return stats
     
-    def clear_manager_data(self):
-        """Clear manager data storage"""
-        self.manager_buffer.clear()
+    def clear_manager_data(self, buffer: HierarchicalPPOBuffer):
+        """Clear manager data storage in the provided buffer"""
+        buffer.clear()
     
     def save(self, path: str):
         """Save all models and training stats"""
         torch.save({
-            'encoder_state_dict': self.encoder.state_dict(),
+            'manager_encoder_state_dict': self.manager_encoder.state_dict(),
             'manager_policy_state_dict': self.manager_policy.state_dict(),
             'manager_value_state_dict': self.manager_value.state_dict(),
             'worker_policy_state_dict': self.worker_policy.state_dict(),
             'worker_value_state_dict': self.worker_value.state_dict(),
-            'manager_optimizer_state_dict': self.manager_optimizer.state_dict(),
-            'worker_optimizer_state_dict': self.worker_optimizer.state_dict(),
+            'manager_policy_optimizer_state_dict': self.manager_policy_optimizer.state_dict(),
+            'manager_value_optimizer_state_dict': self.manager_value_optimizer.state_dict(),
+            'worker_policy_optimizer_state_dict': self.worker_policy_optimizer.state_dict(),
+            'worker_value_optimizer_state_dict': self.worker_value_optimizer.state_dict(),
             'training_stats': self.training_stats,
             # Save configuration parameters
             'input_dim': self.input_dim,
@@ -448,7 +435,6 @@ class HierarchicalAgent:
             'gae_lambda': self.gae_lambda,
             'clip_ratio': self.clip_ratio,
             'entropy_coef': self.entropy_coef,
-            'epsilon_greedy': self.epsilon_greedy,
             'device': str(self.device)
         }, path)
     
@@ -456,7 +442,7 @@ class HierarchicalAgent:
         """Load all models and training stats"""
         checkpoint = torch.load(path, map_location=self.device)
         try:
-            self.encoder.load_state_dict(checkpoint['encoder_state_dict'])
+            self.manager_encoder.load_state_dict(checkpoint['manager_encoder_state_dict'])
             self.manager_policy.load_state_dict(checkpoint['manager_policy_state_dict'])
             self.manager_value.load_state_dict(checkpoint['manager_value_state_dict'])
             self.worker_policy.load_state_dict(checkpoint['worker_policy_state_dict'])
@@ -467,8 +453,10 @@ class HierarchicalAgent:
             print("Details:", e)
             raise
         
-        self.manager_optimizer.load_state_dict(checkpoint['manager_optimizer_state_dict'])
-        self.worker_optimizer.load_state_dict(checkpoint['worker_optimizer_state_dict'])
+        self.manager_policy_optimizer.load_state_dict(checkpoint['manager_policy_optimizer_state_dict'])
+        self.manager_value_optimizer.load_state_dict(checkpoint['manager_value_optimizer_state_dict'])
+        self.worker_policy_optimizer.load_state_dict(checkpoint['worker_policy_optimizer_state_dict'])
+        self.worker_value_optimizer.load_state_dict(checkpoint['worker_value_optimizer_state_dict'])
         self.training_stats = checkpoint['training_stats']
         
         # Load goal_duration if available (for backward compatibility)
@@ -493,7 +481,6 @@ class HierarchicalAgent:
                 'gae_lambda': checkpoint['gae_lambda'],
                 'clip_ratio': checkpoint['clip_ratio'],
                 'entropy_coef': checkpoint['entropy_coef'],
-                'epsilon_greedy': checkpoint['epsilon_greedy'],
                 'device': checkpoint['device']
             }
         else:

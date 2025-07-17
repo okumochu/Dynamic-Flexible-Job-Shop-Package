@@ -70,7 +70,7 @@ class PolicyNetwork(nn.Module):
     Separate policy network for PPO agent.
     Takes observation and outputs action logits.
     """
-    def __init__(self, input_dim, action_dim, hidden_dim = 128):
+    def __init__(self, input_dim, action_dim, hidden_dim = 256):
         super().__init__()
         self.policy_network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim // 2),
@@ -237,7 +237,27 @@ class WorkerPolicy(nn.Module):
         # -> [batch_size, action_dim]
         action_logits = torch.bmm(action_goal_matrix, w_t.unsqueeze(-1)).squeeze(-1)
         
-        # Policy distribution
-        action_probs = F.softmax(action_logits, dim=-1)
-        
-        return action_probs
+        return action_logits
+
+class HierarchicalValueNetwork(nn.Module):
+    """
+    Separate value network for hierarchical PPO agent.
+    Takes latent state `z` and outputs state value.
+    """
+    def __init__(self, latent_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.value_network = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        self._init_weights()
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=1)
+                nn.init.constant_(module.bias, 0)
+    def forward(self, z):
+        return self.value_network(z)

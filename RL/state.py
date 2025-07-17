@@ -81,11 +81,12 @@ class State:
             for op_pos in range(self.operation_dim):
                 # Fix: process_time is [operation][machine], so we need to handle it properly
                 # Take the minimum processing time across all machines for this operation
-                if isinstance(v['operations']['process_time'][op_pos], list):
-                    min_proc_time = min(v['operations']['process_time'][op_pos]) if any(v['operations']['process_time'][op_pos]) else 0
-                    obs.append(min_proc_time/self.avg_processing_time)
+                if op_pos < len(v['operations']['process_time']) and isinstance(v['operations']['process_time'][op_pos], list):
+                    compatible_proc_times = [pt for pt in v['operations']['process_time'][op_pos] if pt > 0]
+                    min_proc_time = min(compatible_proc_times) if compatible_proc_times else 0
+                    obs.append(min_proc_time / self.avg_processing_time)
                 else:
-                    obs.append(v['operations']['process_time'][op_pos]/self.avg_processing_time)
+                    obs.append(0.0) # No processing time if op doesn't exist
                 # Add operation start time for each machine (matrix representation)
                 for machine_id in range(self.machine_dim):
                     obs.append(v['operations']['operation_start_time'][op_pos][machine_id]/max_operation_start_time)

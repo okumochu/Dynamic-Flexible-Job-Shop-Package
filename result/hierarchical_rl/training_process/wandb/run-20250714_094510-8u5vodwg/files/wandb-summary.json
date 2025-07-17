@@ -1,1 +1,0 @@
-{"_step":3999,"alpha":0.10112499999999991,"manager_loss":0.07198844850063324,"_runtime":730,"episode_makespan":80,"epoch":799,"episode_reward":-483.5,"worker_value_loss":2217.0642822265627,"avg_goal_norm":1,"worker_policy_loss":-6.331482887268066,"episode_twt":887,"_timestamp":1.7524582415465772e+09,"avg_cosine_alignment":0.8757294416427612,"_wandb":{"runtime":730}}

@@ -26,15 +26,15 @@ class FlatRLTrainer:
     def __init__(self, 
                  env: RLEnv,
                  epochs: int, 
-                 steps_per_epoch: int = 4000, # default 4000
-                 train_pi_iters: int = 80, # default 80
-                 train_v_iters: int = 80, # default 80
-                 target_kl: float = 0.1,  # default 0.01
-                 pi_lr: float = 3e-5, # default 3e-4
-                 v_lr: float = 1e-4, # default 1e-3
+                 steps_per_epoch: int = 4000,
+                 train_pi_iters: int = 80,
+                 train_v_iters: int = 80,
+                 pi_lr: float = 3e-5,
+                 v_lr: float = 1e-4,
                  gamma: float = 0.99,
                  gae_lambda: float = 0.97,
                  clip_ratio: float = 0.2,
+                 entropy_coef: float = 0.01,
                  device: str = 'auto',
                  model_save_dir: str = 'result/flat_rl/model'):
         """
@@ -66,7 +66,6 @@ class FlatRLTrainer:
         self.epochs = epochs
         self.train_pi_iters = train_pi_iters
         self.train_v_iters = train_v_iters
-        self.target_kl = target_kl
         
         # Create save directory
         os.makedirs(model_save_dir, exist_ok=True)
@@ -86,6 +85,7 @@ class FlatRLTrainer:
             gamma=gamma,
             gae_lambda=gae_lambda,
             clip_ratio=clip_ratio,
+            entropy_coef=entropy_coef,
             device=device
         )
         
@@ -94,6 +94,7 @@ class FlatRLTrainer:
             'episode_rewards': [],
             'episode_makespans': [],
             'episode_twts': [],
+            'episode_objectives': [],
             'training_stats': [],
             'evaluation_results': []
         }
@@ -109,8 +110,8 @@ class FlatRLTrainer:
         """
         buffer = PPOBuffer(self.steps_per_epoch, (self.env.obs_len,), self.env.action_dim, self.agent.device)
         wandb.init(
-            name=f"experiment_{time.strftime('%Y%m%d_%H%M')}",
-            project="Flexible-Job-Shop-RL",
+            name=f"{time.strftime('%Y%m%d_%H%M')}",
+            project="Flat-RL",
             config={
                 "steps_per_epoch": self.steps_per_epoch,
                 "epochs": self.epochs,
@@ -119,7 +120,7 @@ class FlatRLTrainer:
                 "gamma": self.agent.gamma,
                 "gae_lambda": self.agent.gae_lambda,
                 "clip_ratio": self.agent.clip_ratio,
-                "target_kl": self.target_kl,
+                "entropy_coef": self.agent.entropy_coef,
                 "train_pi_iters": self.train_pi_iters,
                 "train_v_iters": self.train_v_iters,
             }
@@ -128,12 +129,13 @@ class FlatRLTrainer:
         # Training loop
         start_time = time.time()
         pbar = tqdm(range(self.epochs), desc="Training Progress")
-        for epoch in pbar:
+        for step in pbar:
 
             # reset env and initialize episode reward
             obs, _ = self.env.reset()
             obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
             ep_reward = 0
+            ep_objective = 0
 
             # collect data
             for t in range(self.steps_per_epoch):
@@ -150,38 +152,39 @@ class FlatRLTrainer:
                 # one action is selected, add to buffer
                 buffer.add(obs, action, reward, value, log_prob, action_mask, done)
                 ep_reward += reward
+                ep_objective += info.get('objective', 0)
                 obs = next_obs
                 
                 if done:
                     # Episode finished - log episode info
                     wandb.log({
-                        "episode_reward": ep_reward,
+                        "episode_objective": info['objective'],
                         "episode_makespan": info['makespan'],
-                        "episode_twt": info['twt']
+                        "episode_TWT": info['twt']
                     })
                     self.training_history['episode_rewards'].append(ep_reward)
                     self.training_history['episode_makespans'].append(info['makespan'])
                     self.training_history['episode_twts'].append(info['twt'])
+                    self.training_history['episode_objectives'].append(info['objective'])
 
                     # start new episode
                     obs, _ = self.env.reset()
                     obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
                     ep_reward = 0
+                    ep_objective = 0
             
             # PPO update
             stats = self.agent.update(
                 buffer,
                 train_pi_iters=self.train_pi_iters,
-                train_v_iters=self.train_v_iters,
-                target_kl=self.target_kl
+                train_v_iters=self.train_v_iters
             )
             self.training_history['training_stats'].append(stats)
             buffer.clear()
             wandb.log({
                 "policy_loss": stats["policy_loss"],
                 "value_loss": stats["value_loss"],
-                "total_loss": stats["total_loss"],
-                "kl": stats["kl"]
+                "entropy": stats["entropy"]
             })
         training_time = time.time() - start_time
         pbar.close()

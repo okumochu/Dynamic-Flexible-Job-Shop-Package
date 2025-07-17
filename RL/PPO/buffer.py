@@ -48,80 +48,115 @@ class PPOBuffer:
 
 class HierarchicalPPOBuffer:
     """
-    Unified buffer for storing hierarchical RL data, combining manager and hierarchical step data.
-    Supports manager experience, hierarchical step data, and episode tracking.
+    Simplified buffer for storing hierarchical RL data.
+    Uses single buffer with proper indexing instead of separate pointers.
     """
     def __init__(self, buffer_size: int, latent_dim: int, device: torch.device):
         self.buffer_size = buffer_size
         self.device = device
+        
+        # FIX: Use single pointer system to avoid misalignment
         self.ptr = 0
         self.size = 0
-        # Manager data
-        self.states = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
-        self.goals = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
-        self.values = torch.zeros(buffer_size, dtype=torch.float32, device=device)
-        self.rewards = torch.zeros(buffer_size, dtype=torch.float32, device=device)
-        self.dones = torch.zeros(buffer_size, dtype=torch.bool, device=device)
-        # Hierarchical step data
-        self.encoded_states = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
+
+        # Manager experience data
+        self.manager_states = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
+        self.manager_goals = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
+        self.manager_values = torch.zeros(buffer_size, dtype=torch.float32, device=device)
+        self.manager_rewards = torch.zeros(buffer_size, dtype=torch.float32, device=device)
+        self.manager_dones = torch.zeros(buffer_size, dtype=torch.bool, device=device)
+        
+        # Hierarchical step data (pooled goals for each step)
         self.pooled_goals = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
-        self.step_indices = torch.zeros(buffer_size, dtype=torch.long, device=device)
-        # Episode tracking
-        self.episode_starts = []
-        self.episode_ends = []
+        
+        # Track what data is valid
+        self.manager_mask = torch.zeros(buffer_size, dtype=torch.bool, device=device)
+        self.step_mask = torch.zeros(buffer_size, dtype=torch.bool, device=device)
+        
+        # Separate counters for tracking
+        self.manager_count = 0
+        self.step_count = 0
 
-    def add_manager(self, state: torch.Tensor, goal: torch.Tensor, value: float, reward: float, done: bool):
+    def add_manager_transition(self, state: torch.Tensor, goal: torch.Tensor, reward: float, value: float, done: bool):
         """Add manager experience to buffer"""
-        self.states[self.ptr] = state
-        self.goals[self.ptr] = goal
-        self.values[self.ptr] = value
-        self.rewards[self.ptr] = reward
-        self.dones[self.ptr] = done
-        self.ptr = (self.ptr + 1) % self.buffer_size
-        self.size = min(self.size + 1, self.buffer_size)
+        # FIX: Find next available slot for manager data
+        idx = self.manager_count % self.buffer_size
+        
+        self.manager_states[idx] = state
+        self.manager_goals[idx] = goal
+        self.manager_rewards[idx] = reward
+        self.manager_values[idx] = value
+        self.manager_dones[idx] = done
+        self.manager_mask[idx] = True
+        
+        self.manager_count += 1
 
-    def add_hierarchical(self, encoded_state: torch.Tensor, goal: torch.Tensor, pooled_goal: torch.Tensor, step_idx: int):
-        """Add hierarchical step data"""
-        self.encoded_states[self.ptr] = encoded_state
-        self.goals[self.ptr] = goal if goal is not None else torch.zeros_like(encoded_state)
-        self.pooled_goals[self.ptr] = pooled_goal
-        self.step_indices[self.ptr] = step_idx
-        self.ptr = (self.ptr + 1) % self.buffer_size
-        self.size = min(self.size + 1, self.buffer_size)
-
-    def mark_episode_start(self):
-        self.episode_starts.append(self.ptr)
-
-    def mark_episode_end(self):
-        self.episode_ends.append(self.ptr)
+    def add_step_data(self, pooled_goal: torch.Tensor):
+        """Add hierarchical step data (pooled goals)"""
+        # FIX: Find next available slot for step data
+        idx = self.step_count % self.buffer_size
+        
+        self.pooled_goals[idx] = pooled_goal
+        self.step_mask[idx] = True
+        
+        self.step_count += 1
 
     def get_manager_batch(self) -> Dict[str, torch.Tensor]:
+        """Get manager experience batch using mask for valid data"""
+        # FIX: Only return valid manager data
+        valid_manager_indices = self.manager_mask.nonzero(as_tuple=True)[0]
+        
+        if len(valid_manager_indices) == 0:
+            # Return empty tensors if no manager data
+            return {
+                'states': torch.empty((0, self.manager_states.shape[1]), device=self.device),
+                'goals': torch.empty((0, self.manager_goals.shape[1]), device=self.device),
+                'values': torch.empty(0, device=self.device),
+                'rewards': torch.empty(0, device=self.device),
+                'dones': torch.empty(0, dtype=torch.bool, device=self.device)
+            }
+        
         return {
-            'states': self.states[:self.size],
-            'goals': self.goals[:self.size],
-            'values': self.values[:self.size],
-            'rewards': self.rewards[:self.size],
-            'dones': self.dones[:self.size]
+            'states': self.manager_states[valid_manager_indices],
+            'goals': self.manager_goals[valid_manager_indices],
+            'values': self.manager_values[valid_manager_indices],
+            'rewards': self.manager_rewards[valid_manager_indices],
+            'dones': self.manager_dones[valid_manager_indices]
         }
 
-    def get_hierarchical_data(self) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
-        encoded_states = [self.encoded_states[i] for i in range(self.size)]
-        goals = [self.goals[i] for i in range(self.size)]
-        pooled_goals = [self.pooled_goals[i] for i in range(self.size)]
-        return encoded_states, goals, pooled_goals
-
-    def get_episode_data(self, episode_idx: int) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
-        if episode_idx >= len(self.episode_starts) or episode_idx >= len(self.episode_ends):
-            return [], [], []
-        start = self.episode_starts[episode_idx]
-        end = self.episode_ends[episode_idx]
-        encoded_states = [self.encoded_states[i] for i in range(start, end)]
-        goals = [self.goals[i] for i in range(start, end)]
-        pooled_goals = [self.pooled_goals[i] for i in range(start, end)]
-        return encoded_states, goals, pooled_goals
+    def get_hierarchical_data(self) -> torch.Tensor:
+        """Get pooled goals for worker updates using mask for valid data"""
+        # FIX: Only return valid step data
+        valid_step_indices = self.step_mask.nonzero(as_tuple=True)[0]
+        
+        if len(valid_step_indices) == 0:
+            # Return empty tensor if no step data
+            return torch.empty((0, self.pooled_goals.shape[1]), device=self.device)
+        
+        return self.pooled_goals[valid_step_indices]
 
     def clear(self):
-        self.ptr = 0
-        self.size = 0
-        self.episode_starts.clear()
-        self.episode_ends.clear() 
+        """Clear all data and reset counters"""
+        # FIX: Reset all tracking
+        self.manager_mask.fill_(False)
+        self.step_mask.fill_(False)
+        self.manager_count = 0
+        self.step_count = 0
+        
+        # Optional: Zero out tensors for clean slate (not strictly necessary)
+        self.manager_states.zero_()
+        self.manager_goals.zero_()
+        self.manager_values.zero_()
+        self.manager_rewards.zero_()
+        self.manager_dones.zero_()
+        self.pooled_goals.zero_()
+    
+    @property
+    def manager_size(self) -> int:
+        """Get number of valid manager transitions"""
+        return int(self.manager_mask.sum().item())
+    
+    @property
+    def step_size(self) -> int:
+        """Get number of valid step data entries"""
+        return int(self.step_mask.sum().item()) 

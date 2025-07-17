@@ -8,68 +8,30 @@ from RL.hierarchical_rl_trainer import HierarchicalRLTrainer
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 import wandb
 from utils.policy_utils import showcase_hierarchical_policy, create_gantt_chart
-
-# Set wandb output directory and configuration
-training_process_dir = "result/hierarchical_rl/training_process"
-model_dir = "result/hierarchical_rl/model"
-os.environ["WANDB_DIR"] = training_process_dir
-
-# Configure wandb settings
-os.environ["WANDB_PROJECT"] = "Hierarchical-Job-Shop-RL"
+from config import config
 
 
-
-
-def main():
+def run_hierarchical_rl_experiment():
+    """Run hierarchical RL experiment with centralized configuration"""
     
     print("="*60)
     print("🏗️  HIERARCHICAL REINFORCEMENT LEARNING EXPERIMENT")
     print("📋 Manager-Worker Architecture for Job Shop Scheduling")
     print("="*60)
         
-    
     print("\n" + "="*50)
     print("Starting hierarchical RL experiment...")
     print("="*50)
     
-    # Create directories if they don't exist
-    os.makedirs(training_process_dir, exist_ok=True)
-    os.makedirs(model_dir, exist_ok=True)
+    # Get configuration
+    exp_config = config.get_hierarchical_rl_config()
+    simulation_params = exp_config['simulation_params']
+    hrl_params = exp_config['rl_params']
+    result_dirs = exp_config['result_dirs']
     
-    # Example: generate a synthetic problem instance with correct params
-    simulation_params = {
-        'num_jobs': 12,
-        'num_machines': 4,
-        'operation_lb': 4,
-        'operation_ub': 4,
-        'processing_time_lb': 5,
-        'processing_time_ub': 5,   
-        'compatible_machines_lb': 2,
-        'compatible_machines_ub': 2,
-        'seed': 42,
-    }
-    
-    # Hierarchical RL specific parameters
-    total_max_steps = simulation_params['num_jobs'] * simulation_params['operation_ub'] * simulation_params['num_machines']
-    action_dim = simulation_params['num_jobs'] * simulation_params['num_machines']
-    hrl_params = {
-        'alpha': 0.5,
-        'epochs': 800,  # Fewer epochs than flat RL as hierarchical might converge faster
-        'steps_per_epoch': total_max_steps,
-        'goal_duration': total_max_steps//4,  # Manager horizon c
-        'latent_dim': 128,  # Encoded state dimension
-        'goal_dim': action_dim//10,  # Goal space dimension
-        'manager_lr': 1e-5,  # Manager learning rate
-        'worker_lr': 1e-5,  # Worker learning rate
-        'alpha_start': 1.0,  # Initial intrinsic reward weight
-        'alpha_end': 1.0,  # Final intrinsic reward weight
-        'gamma_manager': 0.995,  # Manager discount factor
-        'gamma_worker': 0.95,   # Worker discount factor
-        'gae_lambda': 0.95,
-        'clip_ratio': 0.2,
-        'entropy_coef': 0.01,
-        'epsilon_greedy': 0.1,  # Manager exploration
-    }
+    # Setup directories and wandb
+    config.setup_directories(result_dirs)
+    config.setup_wandb_env(result_dirs['training_process'], exp_config['wandb_project'])
     
     print("Creating data handler and hierarchical environment...")
     data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
@@ -92,15 +54,15 @@ def main():
         goal_dim=hrl_params['goal_dim'],
         manager_lr=hrl_params['manager_lr'],
         worker_lr=hrl_params['worker_lr'],
-        alpha_start=hrl_params['alpha_start'],
-        alpha_end=hrl_params['alpha_end'],
+        alpha=hrl_params['alpha'],
         gamma_manager=hrl_params['gamma_manager'],
         gamma_worker=hrl_params['gamma_worker'],
         gae_lambda=hrl_params['gae_lambda'],
         clip_ratio=hrl_params['clip_ratio'],
         entropy_coef=hrl_params['entropy_coef'],
-        epsilon_greedy=hrl_params['epsilon_greedy'],
-        model_save_dir=model_dir
+        train_pi_iters=hrl_params['train_pi_iters'],
+        train_v_iters=hrl_params['train_v_iters'],
+        model_save_dir=result_dirs['model']
     )
     
     print(f"Starting hierarchical training for {hrl_params['epochs']} epochs...")
@@ -120,7 +82,7 @@ def main():
             print(f"Final average TWT: {sum(recent_twts) / len(recent_twts):.2f}")
         
         print(f"Training time: {results['training_time']:.2f} seconds")
-        print(f"Model saved in {model_dir}, wandb logs in {training_process_dir}.")
+        print(f"Model saved in {result_dirs['model']}, wandb logs in {result_dirs['training_process']}.")
         
         # Evaluate the trained hierarchical policy
         print("\nEvaluating trained hierarchical policy...")
@@ -138,9 +100,7 @@ def main():
             obs, _ = env.reset()
             obs = torch.tensor(obs, dtype=torch.float32, device=trainer.agent.device)
             
-            manager_hidden = None
             goals_history = []
-            encoded_states_history = []
             
             episode_reward = 0
             step = 0
@@ -149,11 +109,10 @@ def main():
             while not env.state.is_done() and step < max_steps:
                 # Encode state
                 z_t = trainer.agent.encode_state(obs)
-                encoded_states_history.append(z_t)
                 
                 # Manager decision
                 if step % trainer.goal_duration == 0:
-                    goal, _ = trainer.agent.get_manager_goal(z_t)
+                    goal = trainer.agent.get_manager_goal(z_t)
                     if goal is not None:
                         goals_history.append(goal)
                 
@@ -181,7 +140,6 @@ def main():
                 if done:
                     break
             
-            gantt_save_path_trainer = os.path.join(training_process_dir, "hierarchical_gantt_trainer.png")
             print(f"✓ Trainer episode completed (Makespan: {info['makespan']:.2f}, TWT: {info['twt']:.2f})")
             
         except Exception as e:
@@ -190,8 +148,8 @@ def main():
         # Also showcase using hierarchical policy showcase function
         print("Creating Gantt chart using hierarchical showcase function...")
         try:
-            gantt_save_path_showcaser = os.path.join(training_process_dir, "hierarchical_gantt_showcase.png")
-            showcaser_result = showcase_hierarchical_policy(model_dir=model_dir, env=env)
+            gantt_save_path_showcaser = os.path.join(result_dirs['training_process'], "hierarchical_gantt_showcase.png")
+            showcaser_result = showcase_hierarchical_policy(model_dir=result_dirs['model'], env=env)
             
             # Create Gantt chart separately
             create_gantt_chart(showcaser_result, save_path=gantt_save_path_showcaser, title_suffix="Hierarchical RL")
@@ -211,7 +169,7 @@ def main():
             traceback.print_exc()
         
         print(f"\nHierarchical RL experiment completed successfully!")
-        print(f"Results saved in: {training_process_dir}")
+        print(f"Results saved in: {result_dirs['training_process']}")
         
         # Print summary comparison with flat RL structure
         print(f"\n" + "="*50)
@@ -229,11 +187,19 @@ def main():
         print(f"  Avg TWT: {evaluation_result['avg_twt']:.2f}")
         print(f"Training Time: {results['training_time']:.2f}s")
         
+        return results, evaluation_result
+        
     except Exception as e:
         print(f"Hierarchical training failed: {e}")
         import traceback
         traceback.print_exc()
-        return
+        return None, None
+
+
+def main():
+    """Main function to run hierarchical RL experiment"""
+    run_hierarchical_rl_experiment()
+
 
 if __name__ == "__main__":
     main()

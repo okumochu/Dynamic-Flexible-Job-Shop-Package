@@ -1,1 +1,0 @@
-{"epoch":799,"avg_goal_norm":0.9999999403953552,"_wandb":{"runtime":717},"episode_reward":-515.5,"_step":3999,"avg_cosine_alignment":1.0000001192092896,"worker_value_loss":2806.5656005859373,"_runtime":717,"alpha":0.500625,"episode_twt":936,"_timestamp":1.7524592027074156e+09,"manager_loss":0.022004082798957825,"worker_policy_loss":-16.302525901794432,"episode_makespan":95}

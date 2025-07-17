@@ -44,12 +44,10 @@ class FlatAgent:
         self.training_stats = {
             'policy_loss': [],
             'value_loss': [],
-            'entropy_loss': [],
-            'clip_fraction': [],
-            'kl': []
+            'entropy': []
         }
     
-    def take_action(self, obs: torch.Tensor, action_mask: torch.Tensor) -> Tuple[int, float, float]:
+    def take_action(self, obs: torch.Tensor, action_mask: torch.Tensor, deterministic: bool = False) -> Tuple[int, float, float]:
         with torch.no_grad():
             obs = obs.unsqueeze(0).to(self.device)
             action_mask = action_mask.to(self.device)
@@ -62,23 +60,25 @@ class FlatAgent:
 
             # Sample action
             dist = Categorical(logits=masked_logits)
-            action = dist.sample()
+            if deterministic:
+                action = torch.argmax(masked_logits)
+            else:
+                action = dist.sample()
 
             # return log_prob, value
             log_prob = dist.log_prob(action)
             value = self.value(obs)
             return int(action.item()), float(log_prob.item()), float(value.item())
     
-    def update(self, buffer: PPOBuffer, train_pi_iters: int, train_v_iters: int, target_kl: float):
+    def update(self, buffer: PPOBuffer, train_pi_iters: int, train_v_iters: int):
         """
         Update PPO agent using buffer.
         Args:
             buffer: PPOBuffer with experience
             train_pi_iters: Number of policy update iterations
             train_v_iters: Number of value update iterations
-            target_kl: Early stopping KL threshold (0.0 disables early stopping)
         Returns:
-            stats: dict with losses, clip_fraction, kl
+            stats: dict with policy_loss, value_loss, and entropy
         """
         batch = buffer.get_batch()
         
@@ -87,8 +87,10 @@ class FlatAgent:
             batch['rewards'], batch['values'], batch['dones'], 
             self.gamma, self.gae_lambda
         )
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
 
         """
         Use same data to train policy and value function with setting ammount of steps.
@@ -97,7 +99,7 @@ class FlatAgent:
         for i in range(train_pi_iters):
 
             """
-            In first iteration, the policy almost the same as the old policy.
+            In first iteration, a new policy is generated based on the old one.
             But, in the second iteration, the policy is updated.
             """
             action_logits = self.policy(batch['observations'])
@@ -115,34 +117,30 @@ class FlatAgent:
             )
             
             # Total policy loss with entropy penalty
-            total_policy_loss = policy_loss - self.entropy_coef * entropy
+            total_policy_loss_tensor = policy_loss - self.entropy_coef * entropy
             
             # update policy
             self.policy_optimizer.zero_grad()
-            total_policy_loss.backward()
+            total_policy_loss_tensor.backward()
             self.policy_optimizer.step()
+            
+            total_policy_loss += total_policy_loss_tensor.item()
+            total_entropy += entropy.item()
 
-            # KL divergence for early stopping (appox_kl = old_policy_log_prob - new_policy_log_prob)
-            with torch.no_grad():
-                approx_kl = (batch['log_probs'] - new_log_probs).mean().item()
-            if target_kl > 0.0 and approx_kl > 1.5 * target_kl:
-                print(f"Early stopping at iter {i} due to reaching max kl: {approx_kl:.4f}")
-                break
-        
-        # Value function update (off-policy, no need early stopping. think it as a regression problem)
+        # Value function update (off-policy, no need for early stopping)
         for _ in range(train_v_iters):
-            values = self.value(batch['observations'])
-            value_loss = F.mse_loss(values.squeeze(), returns)
+            values = self.value(batch['observations']).squeeze(-1)
+            value_loss = F.mse_loss(values, returns)
             self.value_optimizer.zero_grad()
             value_loss.backward()
             self.value_optimizer.step()
+            total_value_loss += value_loss.item()
         
         # Logging
         stats = {
-            'policy_loss': float(policy_loss.item()),
-            'value_loss': float(value_loss.item()),
-            'entropy': float(entropy.item()),
-            'kl': float(approx_kl)
+            'policy_loss': total_policy_loss / train_pi_iters,
+            'value_loss': total_value_loss / train_v_iters,
+            'entropy': total_entropy / train_pi_iters
         }
         for k in stats:
             if k in self.training_stats:
@@ -204,7 +202,7 @@ class FlatAgent:
         else:
             raise ValueError("This checkpoint does not contain configuration parameters. It was likely saved with an older version.") 
 
-    def get_deterministic_action(self, obs: torch.Tensor, action_mask: torch.Tensor):
+    def get_deterministic_action(self, obs: torch.Tensor, action_mask: torch.Tensor) -> int:
         """Selects the action with the highest probability (argmax) among valid actions."""
         with torch.no_grad():
             obs = obs.unsqueeze(0).to(self.device)
@@ -213,7 +211,5 @@ class FlatAgent:
             action_logits = action_logits.squeeze(0)
             masked_logits = action_logits.clone()
             masked_logits[~action_mask] = float('-inf')
-            if (~action_mask).all():
-                raise RuntimeError("All actions are masked in get_deterministic_action. This should not happen.")
             action = torch.argmax(masked_logits).item()
             return int(action)

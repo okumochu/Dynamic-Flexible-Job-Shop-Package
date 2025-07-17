@@ -1,1 +1,0 @@
-{"_wandb":{"runtime":170},"_runtime":170,"episode_makespan":100,"_timestamp":1.7523225646157079e+09,"avg_cosine_alignment":-0.7328100800514221,"avg_goal_norm":1,"epoch":336,"_step":1686,"alpha":0.622,"manager_loss":158513.15625,"episode_reward":-645,"episode_twt":1190,"worker_policy_loss":-0.008815775625407696,"worker_value_loss":138.00575256347656}

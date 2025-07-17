@@ -104,14 +104,9 @@ class RLEnv(gym.Env):
         # Calculate correct start time based on constraints
         job_state = job_states[job_id]
         machine_available_time = job_state['machine_available_time'][machine_id]
+        prev_op_finish_time = job_state['operations']['finish_time'][op_idx - 1] if op_idx > 0 else 0
         
-        # For first operation, start when machine is available
-        # For subsequent operations, start when both machine is available and previous operation is finished
-        if op_idx == 0:
-            start_time = machine_available_time
-        else:
-            prev_op_finish_time = job_state['operations']['finish_time'][op_idx - 1]
-            start_time = max(machine_available_time, prev_op_finish_time)
+        start_time = max(machine_available_time, prev_op_finish_time)
         
         proc_time = op.get_processing_time(machine_id)
         finish_time = start_time + proc_time
@@ -128,7 +123,7 @@ class RLEnv(gym.Env):
         # Check if episode is now done after this action
         if self.state.is_done():
             terminated = True
-            truncated = True
+            done = True
 
         # Add detailed info if requested (useful for hierarchical RL)
         if self.detailed_info:
@@ -142,7 +137,7 @@ class RLEnv(gym.Env):
                 'processing_time': proc_time
             })
 
-        return obs, reward, terminated, truncated, objective_info
+        return obs, reward, terminated, False, objective_info
     
     def get_action_mask(self) -> torch.Tensor:
         """Get boolean mask for valid actions."""

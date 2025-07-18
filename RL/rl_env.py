@@ -26,8 +26,8 @@ class RLEnv(gym.Env):
     Compatible with both flat and hierarchical RL algorithms.
     """
     
-    def __init__(self, data_handler, alpha: float, max_jobs: Optional[int] = None, 
-                 max_machines: Optional[int] = None, detailed_info: bool = False):
+    def __init__(self, data_handler, alpha: float, use_reward_shaping: bool = True, max_jobs: Optional[int] = None, 
+                 max_machines: Optional[int] = None):
         """
         Initialize the environment.
         
@@ -36,7 +36,6 @@ class RLEnv(gym.Env):
             alpha: Weight for TWT in reward
             max_jobs: Maximum jobs for padding (default: num_jobs)
             max_machines: Maximum machines for padding (default: num_machines)
-            detailed_info: Whether to include detailed step information (useful for hierarchical RL)
         """
         super().__init__()
         
@@ -51,10 +50,10 @@ class RLEnv(gym.Env):
         self.due_dates = self.state.due_dates
         self.weights = self.state.weights
         self.alpha = alpha
+        self.use_reward_shaping = use_reward_shaping
         self.max_jobs = self.state.job_dim
         self.max_machines = self.state.machine_dim
         self.action_dim = self.state.action_dim
-        self.detailed_info = detailed_info
         
         # Initialize state and get obs_len
         self.state.reset()
@@ -62,18 +61,13 @@ class RLEnv(gym.Env):
         
         self.action_space = spaces.Discrete(self.action_dim)
         self.observation_space = spaces.Box(low=0, high=1, shape=(self.obs_len,), dtype=np.float32)
-        self.last_objective = 0
-        
-        # Optional tracking for detailed info (useful for hierarchical RL)
-        self.step_count = 0
-        self.episode_steps = []
+        self.last_step_objective = 0
+        self.last_episode_objective = 0
         
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         """Reset the environment to initial state."""
         self.state.reset()
-        self.last_objective = 0
-        self.step_count = 0
-        self.episode_steps = []
+        self.last_step_objective = 0
         obs = self.state._to_numpy()
         return obs, {}
     
@@ -92,7 +86,6 @@ class RLEnv(gym.Env):
             info: Additional information (detailed if requested)
         """
         terminated = False
-        truncated = False
         objective_info = {}
 
         # Decode Action
@@ -114,28 +107,15 @@ class RLEnv(gym.Env):
         objective_info = self.get_current_objective()
 
         # Calculate dense reward
-        reward = self.last_objective - objective_info['objective']
-        self.last_objective = objective_info['objective']
+        reward = self.get_reward(use_reward_shaping=self.use_reward_shaping)
+        self.last_step_objective = objective_info['objective'] # update for dense reward
 
         obs = self.state._to_numpy()
-        self.step_count += 1
 
         # Check if episode is now done after this action
         if self.state.is_done():
+            self.last_episode_objective = objective_info['objective'] # update for sparse reward
             terminated = True
-            done = True
-
-        # Add detailed info if requested (useful for hierarchical RL)
-        if self.detailed_info:
-            objective_info.update({
-                'step_count': self.step_count,
-                'job_id': job_id,
-                'machine_id': machine_id,
-                'operation_id': op_idx,
-                'start_time': start_time,
-                'finish_time': finish_time,
-                'processing_time': proc_time
-            })
 
         return obs, reward, terminated, False, objective_info
     
@@ -193,3 +173,20 @@ class RLEnv(gym.Env):
             'twt': twt,
             'objective': (1 - self.alpha) * makespan + self.alpha * twt
         }
+    
+    def get_reward(self, use_reward_shaping:bool) -> float:
+        """Get reward for the current state.
+        Args:
+            use_reward_shaping: Whether to use dense reward
+        Returns:
+            reward: Reward for the current state
+        """
+        if use_reward_shaping:
+            # dense reward means the difference between the last step's objective and the current step's objective
+            return self.last_step_objective - self.get_current_objective()['objective']
+        else:
+            # sparse reward means the difference between the last episode's objective and the current episode's objective
+            if self.state.is_done():
+                return self.last_episode_objective - self.get_current_objective()['objective']
+            else:
+                return 0

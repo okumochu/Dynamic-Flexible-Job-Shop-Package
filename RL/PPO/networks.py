@@ -128,7 +128,7 @@ Following is the hierarchical RL network.
 
 class PerceptualEncoder(nn.Module):
     
-    def __init__(self, input_dim: int, latent_dim: int, hidden_dim: int = 128):
+    def __init__(self, input_dim: int, latent_dim: int, hidden_dim: int = 256):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -146,7 +146,7 @@ class PerceptualEncoder(nn.Module):
 class ManagerPolicy(nn.Module):
     """Manager policy network that emits unit-norm goal vectors"""
     
-    def __init__(self, latent_dim: int, hidden_dim: int = 128):
+    def __init__(self, latent_dim: int, hidden_dim: int = 256):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -186,7 +186,7 @@ class WorkerPolicy(nn.Module):
     """Worker policy network that combines PPO with goal-conditioned policy (policy only)"""
     
     def __init__(self, latent_dim: int, action_dim: int, 
-                 goal_dim: int, hidden_dim: int = 128):
+                 goal_dim: int, hidden_dim: int = 256):
         super().__init__()
         self.latent_dim = latent_dim
         self.action_dim = action_dim
@@ -238,26 +238,3 @@ class WorkerPolicy(nn.Module):
         action_logits = torch.bmm(action_goal_matrix, w_t.unsqueeze(-1)).squeeze(-1)
         
         return action_logits
-
-class HierarchicalValueNetwork(nn.Module):
-    """
-    Separate value network for hierarchical PPO agent.
-    Takes latent state `z` and outputs state value.
-    """
-    def __init__(self, latent_dim: int, hidden_dim: int = 128):
-        super().__init__()
-        self.value_network = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
-        self._init_weights()
-    def _init_weights(self):
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=1)
-                nn.init.constant_(module.bias, 0)
-    def forward(self, z):
-        return self.value_network(z)

@@ -34,6 +34,8 @@ class ExperimentConfig:
             'gae_lambda': 0.95,
             'clip_ratio': 0.2,
             'entropy_coef': 0.01,
+            'use_reward_shaping': True,  # Whether to use dense rewards
+            'test_interval': 10,  # How often to test generalization (in epochs)
         }
         
         # Flat RL specific parameters
@@ -41,27 +43,27 @@ class ExperimentConfig:
             **self.common_rl_params,
             'gamma': 0.99,
             'steps_per_epoch': self.total_max_steps,
-            'epochs': 500,  
+            'epochs': 800,  # Full training with 700 epochs
             'pi_lr': 1e-5,
             'v_lr': 1e-5,
-            'train_pi_iters': self.total_max_steps,
-            'train_v_iters': self.total_max_steps,
+            'train_pi_iters': self.total_max_steps//2,
+            'train_v_iters': self.total_max_steps//2,
         }
         
         # Hierarchical RL specific parameters
         self.hierarchical_rl_params = {
             **self.common_rl_params,
-            'epochs': 250,  # Fewer epochs as hierarchical might converge faster
+            'epochs': 800,  # Full training with 700 epochs
             'steps_per_epoch': self.total_max_steps,
-            'goal_duration': 20,  # Manager horizon c
-            'latent_dim': 128,  # Encoded state dimension
+            'goal_duration': 8,  # Manager horizon c
+            'latent_dim': 256,  # Encoded state dimension
             'goal_dim': 16,  # Goal space dimension
             'manager_lr': 1e-5,
             'worker_lr': 1e-5,
             'gamma_manager': 0.995,
             'gamma_worker': 0.95,
-            'train_pi_iters': self.total_max_steps,
-            'train_v_iters': self.total_max_steps,
+            'train_pi_iters': self.total_max_steps//2,
+            'train_v_iters': self.total_max_steps//2,
         }
     
     def get_flat_rl_config(self) -> Dict[str, Any]:

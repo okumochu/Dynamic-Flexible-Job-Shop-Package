@@ -35,6 +35,8 @@ class FlatRLTrainer:
                  gae_lambda: float = 0.97,
                  clip_ratio: float = 0.2,
                  entropy_coef: float = 0.01,
+                 project_name: Optional[str] = None,
+                 run_name: Optional[str] = None,
                  device: str = 'auto',
                  model_save_dir: str = 'result/flat_rl/model'):
         """
@@ -66,7 +68,8 @@ class FlatRLTrainer:
         self.epochs = epochs
         self.train_pi_iters = train_pi_iters
         self.train_v_iters = train_v_iters
-        
+        self.project_name = project_name if project_name is not None else "dfjs"
+        self.run_name = "_" + run_name if run_name is not None else ""
         # Create save directory
         os.makedirs(model_save_dir, exist_ok=True)
         
@@ -89,14 +92,12 @@ class FlatRLTrainer:
             device=device
         )
         
-        # Training statistics
+        # Training statistics (simplified - only episode metrics)
         self.training_history = {
             'episode_rewards': [],
             'episode_makespans': [],
             'episode_twts': [],
-            'episode_objectives': [],
-            'training_stats': [],
-            'evaluation_results': []
+            'episode_objectives': []
         }
         
         print(f"Trainer initialized on device: {self.agent.device}")
@@ -231,8 +232,8 @@ class FlatRLTrainer:
         os.makedirs(wandb_dir, exist_ok=True)
         
         wandb.init(
-            name=f"Flat_RL_{time.strftime('%Y%m%d_%H%M')}",
-            project="dfjs",
+            name=f"FLR_{time.strftime('%Y%m%d_%H%M')}{self.run_name}",
+            project=self.project_name,
             dir=wandb_dir,
             config={
                 "steps_per_epoch": self.steps_per_epoch,
@@ -261,7 +262,6 @@ class FlatRLTrainer:
                 train_pi_iters=self.train_pi_iters,
                 train_v_iters=self.train_v_iters
             )
-            self.training_history['training_stats'].append(stats)
             buffer.clear()
             
             # Log training metrics (only loss/entropy, not redundant episode aggregates)
@@ -298,7 +298,6 @@ class FlatRLTrainer:
             'episode_rewards': self.training_history['episode_rewards'],
             'episode_makespans': self.training_history['episode_makespans'],
             'episode_twts': self.training_history['episode_twts'],
-            'training_stats': self.training_history['training_stats'],
             'training_time': training_time,
             'model_filename': model_filename
         }

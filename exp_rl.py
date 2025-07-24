@@ -45,6 +45,7 @@ def run_flat_rl_experiment():
         v_lr=rl_params['v_lr'],
         gamma=rl_params['gamma'],
         gae_lambda=rl_params['gae_lambda'],
+        project_name=exp_config['wandb_project'],
         model_save_dir=result_dirs['model']
     )
     

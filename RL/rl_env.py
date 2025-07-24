@@ -187,6 +187,7 @@ class RLEnv(gym.Env):
         else:
             # sparse reward means the difference between the last episode's objective and the current episode's objective
             if self.state.is_done():
-                return self.last_episode_objective - self.get_current_objective()['objective']
+                # log(objective) is the negative reward
+                return  - self.get_current_objective()['objective']
             else:
                 return 0

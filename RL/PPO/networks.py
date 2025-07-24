@@ -75,10 +75,8 @@ class PolicyNetwork(nn.Module):
         self.policy_network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(hidden_dim // 2, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, action_dim)
@@ -103,10 +101,8 @@ class ValueNetwork(nn.Module):
         self.value_network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, 1)
@@ -151,12 +147,15 @@ class ManagerPolicy(nn.Module):
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
         
+        # GRU for temporal dynamics
+        self.recurrent_network = nn.GRU(input_size=latent_dim, hidden_size=hidden_dim, batch_first=True)
+        
         self.policy_network = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),  # FIX: Input from GRU output, not latent_dim
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, latent_dim)
+            nn.Linear(hidden_dim, latent_dim)  # Output goal in latent space
         )
         
         # Initialize weights
@@ -175,8 +174,14 @@ class ManagerPolicy(nn.Module):
         Returns:
             goals: [batch_size, latent_dim] = unit-norm goal vectors
         """
-        # Generate goals
-        raw_goals = self.policy_network(z)
+        # Process through GRU with proper batch_first=True
+        # z already has batch dimension, add sequence dimension
+        z_seq = z.unsqueeze(1)  # [batch_size, 1, latent_dim]
+        z_recurrent, _ = self.recurrent_network(z_seq)  # [batch_size, 1, hidden_dim]
+        z_recurrent = z_recurrent.squeeze(1)  # [batch_size, hidden_dim]
+        
+        # FIX: Use GRU output instead of ignoring it
+        raw_goals = self.policy_network(z_recurrent)  # Process GRU output
         goals = F.normalize(raw_goals, p=2, dim=-1)  # Unit-norm goal vectors
         
         return goals

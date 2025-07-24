@@ -54,7 +54,7 @@ def run_hierarchical_rl_experiment():
         goal_dim=hrl_params['goal_dim'],
         manager_lr=hrl_params['manager_lr'],
         worker_lr=hrl_params['worker_lr'],
-        alpha=hrl_params['alpha'],
+        intrinsic_reward_scale=hrl_params['intrinsic_reward_scale'],
         gamma_manager=hrl_params['gamma_manager'],
         gamma_worker=hrl_params['gamma_worker'],
         gae_lambda=hrl_params['gae_lambda'],
@@ -62,6 +62,7 @@ def run_hierarchical_rl_experiment():
         entropy_coef=hrl_params['entropy_coef'],
         train_pi_iters=hrl_params['train_pi_iters'],
         train_v_iters=hrl_params['train_v_iters'],
+        project_name=exp_config['wandb_project'],
         model_save_dir=result_dirs['model']
     )
     
@@ -108,7 +109,7 @@ def run_hierarchical_rl_experiment():
         print("Creating Gantt chart using hierarchical showcase function...")
         try:
             gantt_save_path_showcaser = os.path.join(result_dirs['training_process'], "hierarchical_gantt_showcase.png")
-            showcaser_result = showcase_hierarchical_policy(model_dir=result_dirs['model'], env=env)
+            showcaser_result = showcase_hierarchical_policy(model_path=result_dirs['model'], env=env)
             
             # Create Gantt chart separately
             create_gantt_chart(showcaser_result, save_path=gantt_save_path_showcaser, title_suffix="Hierarchical RL")

@@ -12,7 +12,7 @@ class ExperimentConfig:
     def __init__(self):
         # Common simulation parameters
         self.simulation_params = {
-            'num_jobs': 12,
+            'num_jobs': 16,
             'num_machines': 4,
             'operation_lb': 4,
             'operation_ub': 4,
@@ -43,7 +43,7 @@ class ExperimentConfig:
             **self.common_rl_params,
             'gamma': 0.99,
             'steps_per_epoch': self.total_max_steps,
-            'epochs': 800,  # Full training with 700 epochs
+            'epochs': 500,  # Full training run
             'pi_lr': 1e-5,
             'v_lr': 1e-5,
             'train_pi_iters': self.total_max_steps//2,
@@ -53,10 +53,10 @@ class ExperimentConfig:
         # Hierarchical RL specific parameters
         self.hierarchical_rl_params = {
             **self.common_rl_params,
-            'epochs': 800,  # Full training with 700 epochs
+            'epochs': 500,  # Full training run
             'steps_per_epoch': self.total_max_steps,
-            'goal_duration': 8,  # Manager horizon c
-            'latent_dim': 256,  # Encoded state dimension
+            'goal_duration': self.total_max_steps//12,  # Manager horizon c, normally 5~20 goal per episode
+            'latent_dim': 128,  # Encoded state dimension
             'goal_dim': 16,  # Goal space dimension
             'manager_lr': 1e-5,
             'worker_lr': 1e-5,
@@ -64,6 +64,7 @@ class ExperimentConfig:
             'gamma_worker': 0.95,
             'train_pi_iters': self.total_max_steps//2,
             'train_v_iters': self.total_max_steps//2,
+            'intrinsic_reward_scale': 0.1,  # Intrinsic:extrinsic reward ratio for hierarchical RL
         }
     
     def get_flat_rl_config(self) -> Dict[str, Any]:
@@ -75,7 +76,7 @@ class ExperimentConfig:
                 'training_process': "result/flat_rl/training_process",
                 'model': "result/flat_rl/model"
             },
-            'wandb_project': "Flexible-Job-Shop-RL"
+            'wandb_project': "tuning HRL"
         }
     
     def get_hierarchical_rl_config(self) -> Dict[str, Any]:
@@ -87,7 +88,7 @@ class ExperimentConfig:
                 'training_process': "result/hierarchical_rl/training_process",
                 'model': "result/hierarchical_rl/model"
             },
-            'wandb_project': "Hierarchical-Job-Shop-RL"
+            'wandb_project': "tuning HRL"
         }
     
     def setup_directories(self, result_dirs: Dict[str, str]) -> None:

@@ -79,7 +79,6 @@ class State:
             obs.append(v['left_ops']/self.operation_dim) # only left ops, current op is for recording purpose only
             obs.append(v['weight']/self.max_weight)
             for op_pos in range(self.operation_dim):
-                # Fix: process_time is [operation][machine], so we need to handle it properly
                 # Take the minimum processing time across all machines for this operation
                 if op_pos < len(v['operations']['process_time']) and isinstance(v['operations']['process_time'][op_pos], list):
                     compatible_proc_times = [pt for pt in v['operations']['process_time'][op_pos] if pt > 0]

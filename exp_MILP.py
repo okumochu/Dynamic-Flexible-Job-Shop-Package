@@ -112,25 +112,15 @@ def run_experiment(data_source, data_type: str, time_limit: int = 600, twt_weigh
     print("=" * 60)
 
 def run_simulation_experiment():
-    """Run experiment with synthetic data."""
+    """Run experiment with synthetic data using config.py parameters."""
     print("\n" + "=" * 80)
     print("SIMULATION EXPERIMENT")
     print("=" * 80)
     
-    # Simulation parameters for a more complex problem
-    simulation_params = {
-        'num_jobs': 8, 
-        'num_machines': 4,
-        'operation_lb': 2,
-        'operation_ub': 4,
-        'processing_time_lb': 3,
-        'processing_time_ub': 8,   
-        'compatible_machines_lb': 2,
-        'compatible_machines_ub': 3,
-        'seed': 42,
-    }
+    from config import config
+    simulation_params = config.simulation_params
     
-    run_experiment(simulation_params, "simulation", time_limit=3600, twt_weight=0.5)
+    run_experiment(simulation_params, "simulation", time_limit=1800, twt_weight=0.5)
 
 
 def main():

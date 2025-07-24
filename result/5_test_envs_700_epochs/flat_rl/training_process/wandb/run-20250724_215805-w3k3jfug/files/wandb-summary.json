@@ -1,0 +1,1 @@
+{"value_loss":83400.89196777344,"entropy":2.8729340713471174,"episode_makespan":120,"generalization/mean_makespan":171.16666666666666,"generalization/mean_objective":431.11999999999995,"generalization/mean_twt":2770.7,"_timestamp":1.7533655207157612e+09,"_step":49,"episode_twt":1507,"episode_objective":813.5,"_wandb":{"runtime":34},"_runtime":34,"policy_loss":184.63522374629974}

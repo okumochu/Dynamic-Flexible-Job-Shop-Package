@@ -51,21 +51,22 @@ class HierarchicalPPOBuffer:
     Simplified buffer for storing hierarchical RL data.
     Uses single buffer with proper indexing instead of separate pointers.
     """
-    def __init__(self, buffer_size: int, latent_dim: int, device: torch.device):
+    def __init__(self, buffer_size: int, latent_dim: int, obs_shape: tuple, device: torch.device):
         self.buffer_size = buffer_size
         self.device = device
         self.manager_count = 0
         self.step_count = 0
-        self.manager_states = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
         self.manager_goals = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
         self.manager_values = torch.zeros(buffer_size, dtype=torch.float32, device=device)
         self.manager_rewards = torch.zeros(buffer_size, dtype=torch.float32, device=device)
         self.manager_dones = torch.zeros(buffer_size, dtype=torch.bool, device=device)
         self.pooled_goals = torch.zeros((buffer_size, latent_dim), dtype=torch.float32, device=device)
+        # Note: No longer need worker_encoded_states - we can re-encode worker observations
+        self.manager_observations = torch.zeros((buffer_size, *obs_shape), dtype=torch.float32, device=device)
 
-    def add_manager_transition(self, state: torch.Tensor, goal: torch.Tensor, reward: float, value: float, done: bool):
+    def add_manager_transition(self, goal: torch.Tensor, reward: float, value: float, done: bool, observation: torch.Tensor = None):
         idx = self.manager_count % self.buffer_size
-        self.manager_states[idx] = state
+        self.manager_observations[idx] = observation
         self.manager_goals[idx] = goal
         self.manager_rewards[idx] = reward
         self.manager_values[idx] = value
@@ -75,31 +76,33 @@ class HierarchicalPPOBuffer:
     def add_step_data(self, pooled_goal: torch.Tensor):
         idx = self.step_count % self.buffer_size
         self.pooled_goals[idx] = pooled_goal
+        # Note: No longer store encoded_state - we'll re-encode worker observations when needed
         self.step_count += 1
 
     def get_manager_batch(self) -> Dict[str, torch.Tensor]:
         count = min(self.manager_count, self.buffer_size)
 
         return {
-            'states': self.manager_states[:count],
             'goals': self.manager_goals[:count],
             'values': self.manager_values[:count],
             'rewards': self.manager_rewards[:count],
-            'dones': self.manager_dones[:count]
+            'dones': self.manager_dones[:count],
+            'observations': self.manager_observations[:count]
         }
 
-    def get_worker_pooled_goals(self) -> torch.Tensor:
+    def get_step_information(self) -> Dict[str, torch.Tensor]:
         count = min(self.step_count, self.buffer_size)
-        if count == 0:
-            return torch.empty((0, self.pooled_goals.shape[1]), device=self.device)
-        return self.pooled_goals[:count]
+
+        return {
+            'pooled_goals': self.pooled_goals[:count]
+        }
 
     def clear(self):
         self.manager_count = 0
         self.step_count = 0
-        self.manager_states.zero_()
         self.manager_goals.zero_()
         self.manager_values.zero_()
         self.manager_rewards.zero_()
         self.manager_dones.zero_()
         self.pooled_goals.zero_()
+        self.manager_observations.zero_()

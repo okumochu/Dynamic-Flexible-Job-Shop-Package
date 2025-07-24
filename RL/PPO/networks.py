@@ -60,6 +60,17 @@ class PPOUpdater:
             dist = Categorical(logits=logits)
         return dist.entropy().mean()
 
+    @staticmethod
+    def transition_policy_loss(encoded_states, goals, advantages):
+        """
+        Compute transition policy loss.
+        """
+        # the current goal means the direction of the transition from s_t to s_t+c
+        cosine_alignment = F.cosine_similarity(encoded_states[1:] - encoded_states[:-1], goals[:-1])
+        # Use advantages[:-1] to match the size of cosine_alignment (one less element)
+        return -torch.mean(advantages[:-1].detach() * cosine_alignment)
+
+
 
 """
 Following is the flat RL network.
@@ -133,8 +144,51 @@ class PerceptualEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, latent_dim)
         )
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                nn.init.constant_(module.bias, 0)
     
     def forward(self, x):
+        z = self.encoder(x)
+        return z
+
+class ManagerEncoder(nn.Module):
+    """
+    Manager-specific encoder that processes PerceptualEncoder output.
+    Updates only from manager's value loss.
+    """
+    def __init__(self, latent_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim)
+        )
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                nn.init.constant_(module.bias, 0)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: [batch_size, latent_dim] = output from PerceptualEncoder
+        Returns:
+            z: [batch_size, latent_dim] = manager-specific encoded state
+        """
         z = self.encoder(x)
         return z
 
@@ -142,7 +196,7 @@ class PerceptualEncoder(nn.Module):
 class ManagerPolicy(nn.Module):
     """Manager policy network that emits unit-norm goal vectors"""
     
-    def __init__(self, latent_dim: int, hidden_dim: int = 256):
+    def __init__(self, latent_dim: int, hidden_dim: int = 128):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -150,8 +204,9 @@ class ManagerPolicy(nn.Module):
         # GRU for temporal dynamics
         self.recurrent_network = nn.GRU(input_size=latent_dim, hidden_size=hidden_dim, batch_first=True)
         
+        # Policy network after GRU
         self.policy_network = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),  # FIX: Input from GRU output, not latent_dim
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -180,8 +235,8 @@ class ManagerPolicy(nn.Module):
         z_recurrent, _ = self.recurrent_network(z_seq)  # [batch_size, 1, hidden_dim]
         z_recurrent = z_recurrent.squeeze(1)  # [batch_size, hidden_dim]
         
-        # FIX: Use GRU output instead of ignoring it
-        raw_goals = self.policy_network(z_recurrent)  # Process GRU output
+        # Process GRU output through policy network
+        raw_goals = self.policy_network(z_recurrent)
         goals = F.normalize(raw_goals, p=2, dim=-1)  # Unit-norm goal vectors
         
         return goals

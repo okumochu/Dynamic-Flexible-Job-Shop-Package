@@ -56,6 +56,11 @@ class HierarchicalRLTrainer:
         self.project_name = project_name if project_name is not None else "dfjs"
         self.run_name = "_" + run_name if run_name is not None else ""
         
+        # Add episode tracking  
+        self.episode_makespans = []
+        self.episode_twts = []
+        self.episode_objectives = []
+        
         # Create hierarchical agent
         self.agent = HierarchicalAgent(
             input_dim=env.obs_len,
@@ -140,11 +145,11 @@ class HierarchicalRLTrainer:
                             
                 # Add manager transition for the completed period
                 manager_buffer.add_manager_transition(
-                    current_encoded_state,
                     current_goal,
                     manager_reward,
                     manager_value, 
-                    False  # Episode not done
+                    False,  # Episode not done
+                    obs  # Raw observation for encoder gradient updates
                 )
                 
                 # Update last goal
@@ -185,12 +190,17 @@ class HierarchicalRLTrainer:
                     final_value = self.agent.manager_value(current_encoded_state.unsqueeze(0)).item()
                 
                 manager_buffer.add_manager_transition(
-                    current_encoded_state,
                     current_goal,
                     final_reward,
                     final_value,
-                    True  # Episode done
+                    True,  # Episode done
+                    obs  # Raw observation for encoder gradient updates
                 )
+                
+                # Track episode metrics
+                self.episode_makespans.append(info['makespan'])
+                self.episode_twts.append(info['twt'])
+                self.episode_objectives.append(info['objective'])
                 
                 # Log individual episode metrics for real-time monitoring
                 if wandb.run is not None:
@@ -253,7 +263,7 @@ class HierarchicalRLTrainer:
 
         # Buffers
         worker_buffer = PPOBuffer(self.steps_per_epoch, (obs_len,), action_dim, self.agent.device)
-        manager_buffer = HierarchicalPPOBuffer(self.steps_per_epoch, self.agent.latent_dim, self.agent.device)
+        manager_buffer = HierarchicalPPOBuffer(self.steps_per_epoch, self.agent.latent_dim, (obs_len,), self.agent.device)
 
         # Training loop
         start_time = time.time()
@@ -275,8 +285,8 @@ class HierarchicalRLTrainer:
                 "policy_loss": worker_stats.get('policy_loss', 0),
                 "value_loss": worker_stats.get('value_loss', 0),
                 "entropy": worker_stats.get('entropy', 0),
-                "goal_alignment": manager_stats.get('avg_cosine_alignment', 0),
-                "manager_reward": manager_stats.get('avg_manager_reward', 0),
+                "manager_policy_loss": manager_stats.get('manager_policy_loss', 0),
+                "manager_value_loss": manager_stats.get('manager_value_loss', 0)
             }
             
             # Test generalization periodically
@@ -306,7 +316,12 @@ class HierarchicalRLTrainer:
 
         return {
             'training_time': time.time() - start_time,
-            'model_filename': model_filename
+            'model_filename': model_filename,
+            'training_history': {
+                'episode_makespans': self.episode_makespans,
+                'episode_twts': self.episode_twts,
+                'episode_objectives': self.episode_objectives
+            }
         }
     
     def save_model(self, filename: str):
@@ -326,7 +341,7 @@ class HierarchicalRLTrainer:
     
 
 
-    def evaluate_generalization(self, data_handlers: List, temp_model_name: Optional[str] = None) -> Dict:
+    def evaluate_generalization(self, data_handlers: List) -> Dict:
         """
         Evaluate hierarchical model generalization across multiple environments.
         
@@ -338,11 +353,7 @@ class HierarchicalRLTrainer:
             Dictionary containing evaluation results for each environment
         """
         
-        # Save current model temporarily
-        if temp_model_name is None:
-            temp_model_name = f"temp_model_{time.strftime('%Y%m%d_%H%M%S')}.pth"
-        temp_model_path = os.path.join(self.model_save_dir, temp_model_name)
-        self.agent.save(temp_model_path)
+        # (Removed model saving/loading, not needed for evaluation)
         
         # Evaluate on each environment
         generalization_results = {}
@@ -361,7 +372,8 @@ class HierarchicalRLTrainer:
             obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
             
             # Initialize hierarchical state tracking
-            goals_history = []
+            last_goal = None
+            current_goal = None
             episode_reward = 0
             step = 0
             manager_decisions = 0
@@ -373,13 +385,11 @@ class HierarchicalRLTrainer:
                 
                 # Manager decision every goal_duration steps
                 if step % self.goal_duration == 0:
-                    goal = self.agent.get_manager_goal(z_t)
-                    if goal is not None:
-                        goals_history.append(goal)
+                    current_goal = self.agent.get_manager_goal(z_t)
                     manager_decisions += 1
                 
                 # Pool goals for worker
-                pooled_goal = self.agent.pool_goals(goals_history, step, self.goal_duration)
+                pooled_goal = self.agent.pool_goals(last_goal, current_goal, step, self.goal_duration)
                 
                 action_mask = test_env.get_action_mask()
                 if not action_mask.any():
@@ -396,6 +406,10 @@ class HierarchicalRLTrainer:
                 next_obs = torch.tensor(next_obs, dtype=torch.float32, device=self.agent.device)
                 obs = next_obs
                 step += 1
+                
+                # Update last_goal for next iteration
+                if step % self.goal_duration == 0:
+                    last_goal = current_goal
                 
                 if done:
                     break
@@ -433,14 +447,6 @@ class HierarchicalRLTrainer:
             'std_reward': np.std(all_rewards),
             'num_environments': len(data_handlers)
         }
-        
-        # Note: Generalization metrics are logged by the main training loop
-        
-
-        
-        # Clean up temporary model
-        if os.path.exists(temp_model_path):
-            os.remove(temp_model_path)
         
         return {
             'individual_results': generalization_results,

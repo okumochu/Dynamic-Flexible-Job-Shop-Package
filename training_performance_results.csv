@@ -1,0 +1,3 @@
+Method,With CL,Without CL
+Flat RL,"Obj: 326.83, MS: 151.41, TWT: 1754.17","Obj: 213.68, MS: 144.95, TWT: 687.34"
+Hierarchical RL,"Obj: 842.10, MS: 138.52, TWT: 1545.67","Obj: 801.31, MS: 137.62, TWT: 1465.01"

@@ -80,11 +80,11 @@ class FlatAgent:
         Returns:
             stats: dict with policy_loss, value_loss, and entropy
         """
-        batch = buffer.get_batch()
+        worker_data = buffer.get_batch()
         
         # Compute GAE advantages using PPOUpdater
         advantages, returns = PPOUpdater.compute_gae_advantages(
-            batch['rewards'], batch['values'], batch['dones'], 
+            worker_data['rewards'], worker_data['values'], worker_data['dones'], 
             self.gamma, self.gae_lambda
         )
         
@@ -102,18 +102,18 @@ class FlatAgent:
             In first iteration, a new policy is generated based on the old one.
             But, in the second iteration, the policy is updated.
             """
-            action_logits = self.policy(batch['observations'])
+            action_logits = self.policy(worker_data['observations'])
             masked_logits = action_logits.clone()
-            masked_logits[~batch['action_masks']] = float('-inf')
+            masked_logits[~worker_data['action_masks']] = float('-inf')
             dist = Categorical(logits=masked_logits)
-            new_log_probs = dist.log_prob(batch['actions'])
+            new_log_probs = dist.log_prob(worker_data['actions'])
             
             # Compute entropy using PPOUpdater
-            entropy = PPOUpdater.compute_entropy(action_logits, batch['action_masks'])
+            entropy = PPOUpdater.compute_entropy(action_logits, worker_data['action_masks'])
 
             # PPO policy loss using PPOUpdater
             policy_loss = PPOUpdater.ppo_policy_loss(
-                new_log_probs, batch['log_probs'], advantages, self.clip_ratio
+                new_log_probs, worker_data['log_probs'], advantages, self.clip_ratio
             )
             
             # Total policy loss with entropy penalty
@@ -129,7 +129,7 @@ class FlatAgent:
 
         # Value function update (off-policy, no need for early stopping)
         for _ in range(train_v_iters):
-            values = self.value(batch['observations']).squeeze(-1)
+            values = self.value(worker_data['observations']).squeeze(-1)
             value_loss = F.mse_loss(values, returns)
             self.value_optimizer.zero_grad()
             value_loss.backward()

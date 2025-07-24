@@ -7,11 +7,8 @@ import torch
 import numpy as np
 import time
 import os
-from typing import Dict, List, Tuple, Optional, cast
+from typing import Dict, List, Optional
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import gymnasium as gym
-from gymnasium import spaces
 import wandb
 from RL.PPO.flat_agent import FlatAgent
 from RL.PPO.buffer import PPOBuffer
@@ -26,63 +23,38 @@ class FlatRLTrainer:
     def __init__(self, 
                  env: RLEnv,
                  epochs: int, 
-                 steps_per_epoch: int = 4000,
-                 train_pi_iters: int = 80,
-                 train_v_iters: int = 80,
-                 pi_lr: float = 3e-5,
-                 v_lr: float = 1e-4,
-                 gamma: float = 0.99,
-                 gae_lambda: float = 0.97,
-                 clip_ratio: float = 0.2,
-                 entropy_coef: float = 0.01,
+                 steps_per_epoch: int,
+                 train_pi_iters: int,
+                 train_v_iters: int,
+                 pi_lr: float,
+                 v_lr: float,
+                 gamma: float,
+                 gae_lambda: float,
+                 clip_ratio: float,
+                 entropy_coef: float,
                  project_name: Optional[str] = None,
                  run_name: Optional[str] = None,
                  device: str = 'auto',
                  model_save_dir: str = 'result/flat_rl/model'):
-        """
-        Initialize the trainer.
         
-        Args:
-            env: The environment to train on
-            pi_lr: Policy learning rate
-            v_lr: Value function learning rate
-            gamma: Discount factor
-            gae_lambda: GAE lambda parameter
-            clip_ratio: PPO clip ratio
-
-            target_kl: Early stopping KL threshold (0.0 disables early stopping)
-            train_pi_iters: Number of policy update iterations per epoch
-            train_v_iters: Number of value update iterations per epoch
-            steps_per_epoch: Number of environment interaction steps to collect per training epoch
-            epochs: Total number of training epochs to run
-            
-        Training Flow:
-            Each epoch: Collect steps_per_epoch steps → Update policy train_pi_iters times → Update value train_v_iters times
-            Total training steps = steps_per_epoch * epochs
-            device: Device to run on ('auto', 'cpu', 'cuda')
-            model_save_dir: Directory to save models
-        """
         self.env = env
-        self.model_save_dir = model_save_dir
-        self.steps_per_epoch = steps_per_epoch
         self.epochs = epochs
+        self.steps_per_epoch = steps_per_epoch
         self.train_pi_iters = train_pi_iters
         self.train_v_iters = train_v_iters
+        self.model_save_dir = model_save_dir
         self.project_name = project_name if project_name is not None else "dfjs"
         self.run_name = "_" + run_name if run_name is not None else ""
-        # Create save directory
-        os.makedirs(model_save_dir, exist_ok=True)
         
-        # Initialize agent
-        # Ensure obs_shape is always a 1D tuple (obs_dim,) for flat state vectors
-        # obs_len is set in env after env.reset()
-        obs_dim = env.obs_len
-        obs_shape = (obs_dim,)
-        action_space = cast(spaces.Discrete, env.action_space)
-        action_dim = int(action_space.n)
+        # Add episode tracking
+        self.episode_makespans = []
+        self.episode_twts = []
+        self.episode_objectives = []
+        
+        # Create agent
         self.agent = FlatAgent(
-            input_dim=obs_dim,
-            action_dim=action_dim,
+            input_dim=env.obs_len,
+            action_dim=env.action_dim,
             pi_lr=pi_lr,
             v_lr=v_lr,
             gamma=gamma,
@@ -92,18 +64,13 @@ class FlatRLTrainer:
             device=device
         )
         
-        # Training statistics (simplified - only episode metrics)
-        self.training_history = {
-            'episode_rewards': [],
-            'episode_makespans': [],
-            'episode_twts': [],
-            'episode_objectives': []
-        }
+        # Create save directory
+        os.makedirs(model_save_dir, exist_ok=True)
         
-        print(f"Trainer initialized on device: {self.agent.device}")
+        print(f"Flat RL Trainer initialized")
         print(f"Environment: {env.num_jobs} jobs, {env.num_machines} machines")
     
-    def collect_rollout(self, env_or_envs, buffer, epoch: int = 0) -> Dict:
+    def collect_rollout(self, env_or_envs, buffer, epoch: int) -> Dict:
         """
         Collect rollout data for one epoch.
         Supports both single environment and curriculum learning with multiple environments.
@@ -121,8 +88,8 @@ class FlatRLTrainer:
             envs = env_or_envs
             # Sequential training: distribute epochs evenly across environments
             epochs_per_env = self.epochs // len(envs)
-            remaining_epochs = self.epochs % len(envs)
             
+            # Make the rest of the epochs go to the last environment
             env_idx = epoch // epochs_per_env if epoch < (len(envs) - 1) * epochs_per_env else len(envs) - 1
             if env_idx >= len(envs):
                 env_idx = len(envs) - 1
@@ -134,11 +101,6 @@ class FlatRLTrainer:
         # Reset environment and initialize episode tracking
         obs, _ = current_env.reset()
         obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
-        ep_reward = 0
-        ep_objective = 0
-        
-        # Track episode metrics for this epoch
-        epoch_episodes = []
 
         # Collect data for steps_per_epoch
         for t in range(self.steps_per_epoch):
@@ -153,23 +115,13 @@ class FlatRLTrainer:
 
             # Store experience in buffer
             buffer.add(obs, action, reward, value, log_prob, action_mask, done)
-            ep_reward += reward
-            ep_objective += info.get('objective', 0)
             obs = next_obs
             
             if done:
-                # Collect episode metrics for later aggregation
-                epoch_episodes.append({
-                    'objective': info['objective'],
-                    'makespan': info['makespan'],
-                    'twt': info['twt'],
-                    'reward': ep_reward
-                })
-                
-                self.training_history['episode_rewards'].append(ep_reward)
-                self.training_history['episode_makespans'].append(info['makespan'])
-                self.training_history['episode_twts'].append(info['twt'])
-                self.training_history['episode_objectives'].append(info['objective'])
+                # Track episode metrics
+                self.episode_makespans.append(info['makespan'])
+                self.episode_twts.append(info['twt'])
+                self.episode_objectives.append(info['objective'])
                 
                 # Log individual episode metrics for real-time monitoring
                 if wandb.run is not None:
@@ -182,51 +134,20 @@ class FlatRLTrainer:
                 # Start new episode
                 obs, _ = current_env.reset()
                 obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
-                ep_reward = 0
-                ep_objective = 0
-        
-        # Return aggregated episode metrics for this epoch
-        if epoch_episodes:
-            return {
-                'mean_makespan': np.mean([ep['makespan'] for ep in epoch_episodes]),
-                'mean_twt': np.mean([ep['twt'] for ep in epoch_episodes]),
-                'mean_objective': np.mean([ep['objective'] for ep in epoch_episodes]),
-                'num_episodes': len(epoch_episodes)
-            }
-        else:
-            return {
-                'mean_makespan': 0.0,
-                'mean_twt': 0.0,
-                'mean_objective': 0.0,
-                'num_episodes': 0
-            }
 
-    def train(self, env_or_envs=None, test_environments=None, test_interval=50) -> Dict:
+    def train(self, env_or_envs=None, test_environments=None, test_interval=50):
         """
-        Train the agent using epoch-based PPO (Spinning Up style).
-        Now supports curriculum learning with multiple environments and generalization testing.
+        Main training loop with support for curriculum learning and generalization testing.
         
         Args:
             env_or_envs: Single environment or list of environments. If None, uses self.env
             test_environments: List of test environments for generalization testing
             test_interval: How often to test generalization (in epochs)
-            
-        Returns:
-            Dictionary containing training results
         """
         # Use provided environments or fall back to self.env
         if env_or_envs is None:
             env_or_envs = self.env
         
-        # Get observation dimensions from first environment (assuming all have same structure)
-        if isinstance(env_or_envs, list):
-            obs_len = env_or_envs[0].obs_len
-            action_dim = env_or_envs[0].action_dim
-        else:
-            obs_len = env_or_envs.obs_len
-            action_dim = env_or_envs.action_dim
-            
-        buffer = PPOBuffer(self.steps_per_epoch, (obs_len,), action_dim, self.agent.device)
         # Configure wandb to save in proper directory
         wandb_dir = os.path.join(os.path.dirname(self.model_save_dir), 'training_process')
         os.makedirs(wandb_dir, exist_ok=True)
@@ -236,8 +157,8 @@ class FlatRLTrainer:
             project=self.project_name,
             dir=wandb_dir,
             config={
-                "steps_per_epoch": self.steps_per_epoch,
                 "epochs": self.epochs,
+                "steps_per_epoch": self.steps_per_epoch,
                 "pi_lr": self.agent.pi_lr,
                 "v_lr": self.agent.v_lr,
                 "gamma": self.agent.gamma,
@@ -249,22 +170,33 @@ class FlatRLTrainer:
             }
         )
 
+        # Get observation dimensions from first environment (assuming all have same structure)
+        if isinstance(env_or_envs, list):
+            obs_len = env_or_envs[0].obs_len
+            action_dim = env_or_envs[0].action_dim
+        else:
+            obs_len = env_or_envs.obs_len
+            action_dim = env_or_envs.action_dim
+
+        # Buffer
+        buffer = PPOBuffer(self.steps_per_epoch, (obs_len,), action_dim, self.agent.device)
+
         # Training loop
         start_time = time.time()
-        pbar = tqdm(range(self.epochs), desc="Training Progress")
+        pbar = tqdm(range(self.epochs), desc="Flat Training")
+
         for epoch in pbar:
             # Collect rollout data
-            epoch_metrics = self.collect_rollout(env_or_envs, buffer, epoch)
+            self.collect_rollout(env_or_envs, buffer, epoch)
             
-            # PPO update
+            # Update agent
             stats = self.agent.update(
                 buffer,
                 train_pi_iters=self.train_pi_iters,
                 train_v_iters=self.train_v_iters
             )
-            buffer.clear()
-            
-            # Log training metrics (only loss/entropy, not redundant episode aggregates)
+
+            # Log training metrics
             wandb_log = {
                 "policy_loss": stats["policy_loss"],
                 "value_loss": stats["value_loss"],
@@ -284,27 +216,41 @@ class FlatRLTrainer:
             
             # Log all metrics
             wandb.log(wandb_log)
+
+            buffer.clear()
         
-        training_time = time.time() - start_time
         pbar.close()
         
         # Save model with timestamp
         timestamp = time.strftime('%Y%m%d_%H%M')
         model_filename = f"model_{timestamp}.pth"
-        self.agent.save(os.path.join(self.model_save_dir, model_filename))
+        self.save_model(model_filename)
         wandb.finish()
-        
+
         return {
-            'episode_rewards': self.training_history['episode_rewards'],
-            'episode_makespans': self.training_history['episode_makespans'],
-            'episode_twts': self.training_history['episode_twts'],
-            'training_time': training_time,
-            'model_filename': model_filename
+            'training_time': time.time() - start_time,
+            'model_filename': model_filename,
+            'episode_makespans': self.episode_makespans,
+            'episode_twts': self.episode_twts,
+            'episode_objectives': self.episode_objectives
         }
     
-
+    def save_model(self, filename: str):
+        """Save model using agent's save method"""
+        filepath = os.path.join(self.model_save_dir, filename)
+        self.agent.save(filepath)
+        print(f"Model saved to {filepath}")
     
-    def evaluate_generalization(self, data_handlers: List, temp_model_name: Optional[str] = None) -> Dict:
+    def load_model(self, filename: str):
+        """Load model using agent's load method"""
+        filepath = os.path.join(self.model_save_dir, filename)
+        if os.path.exists(filepath):
+            self.agent.load(filepath)
+            print(f"Model loaded from {filepath}")
+        else:
+            print(f"Model file {filepath} not found")
+
+    def evaluate_generalization(self, data_handlers: List) -> Dict:
         """
         Evaluate model generalization across multiple environments.
         
@@ -315,13 +261,8 @@ class FlatRLTrainer:
         Returns:
             Dictionary containing evaluation results for each environment
         """
-        from RL.rl_env import RLEnv
         
-        # Save current model temporarily
-        if temp_model_name is None:
-            temp_model_name = f"temp_model_{time.strftime('%Y%m%d_%H%M%S')}.pth"
-        temp_model_path = os.path.join(self.model_save_dir, temp_model_name)
-        self.agent.save(temp_model_path)
+        # (Removed model saving/loading, not needed for evaluation)
         
         # Evaluate on each environment
         generalization_results = {}
@@ -395,15 +336,7 @@ class FlatRLTrainer:
             'std_reward': np.std(all_rewards),
             'num_environments': len(data_handlers)
         }
-        
-        # Note: Generalization metrics are logged by the main training loop
-        
-
-        
-        # Clean up temporary model
-        if os.path.exists(temp_model_path):
-            os.remove(temp_model_path)
-        
+                
         return {
             'individual_results': generalization_results,
             'aggregate_stats': aggregate_stats

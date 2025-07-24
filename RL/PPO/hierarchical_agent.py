@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from typing import Optional, Tuple, Dict, List
-from RL.PPO.networks import PerceptualEncoder, ManagerPolicy, WorkerPolicy, ValueNetwork, PPOUpdater
+from RL.PPO.networks import PerceptualEncoder, ManagerEncoder, ManagerPolicy, WorkerPolicy, ValueNetwork, PPOUpdater
 from RL.PPO.buffer import PPOBuffer, HierarchicalPPOBuffer
 
 
@@ -55,22 +55,25 @@ class HierarchicalAgent:
         self.entropy_coef = entropy_coef
         
         # Create models
-        self.manager_encoder = PerceptualEncoder(input_dim, latent_dim).to(self.device)
+        self.state_encoder = PerceptualEncoder(input_dim, latent_dim).to(self.device)
+        self.manager_encoder = ManagerEncoder(latent_dim).to(self.device)  # Manager-specific encoder
         self.manager_policy = ManagerPolicy(latent_dim).to(self.device)
         self.manager_value = ValueNetwork(latent_dim).to(self.device)
 
         self.worker_policy = WorkerPolicy(latent_dim, action_dim, goal_dim).to(self.device)
         self.worker_value = ValueNetwork(latent_dim).to(self.device)
         
-        # FIX: Use separate optimizers - encoder updated ONLY by worker
-        # Encoder optimizer (used only by worker)
-        self.encoder_optimizer = optim.Adam(self.manager_encoder.parameters(), lr=worker_lr)
+        # IMPORTANT: Updated optimizer strategy
+        # 1. PerceptualEncoder: Updated by worker only (policy & value losses)
+        # 2. ManagerEncoder: Updated by manager value loss only
+        self.perceptual_encoder_optimizer = optim.Adam(self.state_encoder.parameters(), lr=worker_lr)
+        self.manager_encoder_optimizer = optim.Adam(self.manager_encoder.parameters(), lr=manager_lr)
         
-        # Manager optimizers (without encoder parameters)
+        # Manager optimizers
         self.manager_policy_optimizer = optim.Adam(self.manager_policy.parameters(), lr=manager_lr)
         self.manager_value_optimizer = optim.Adam(self.manager_value.parameters(), lr=manager_lr)
         
-        # Worker optimizers (without encoder parameters)
+        # Worker optimizers  
         self.worker_policy_optimizer = optim.Adam(self.worker_policy.parameters(), lr=worker_lr)
         self.worker_value_optimizer = optim.Adam(self.worker_value.parameters(), lr=worker_lr)
     
@@ -78,7 +81,9 @@ class HierarchicalAgent:
         """Get manager goal for current encoded state"""
         with torch.no_grad():
             z_input = z_t.unsqueeze(0).to(self.device)  # Add batch dimension
-            goals = self.manager_policy(z_input)
+            # Pass through manager encoder first
+            manager_z = self.manager_encoder(z_input)
+            goals = self.manager_policy(manager_z)
             return goals.squeeze(0)
     
     def get_worker_action_and_value(self, z_t, pooled_goals, action_mask=None):
@@ -110,7 +115,7 @@ class HierarchicalAgent:
             pooled_goals = pooled_goals.unsqueeze(0).to(self.device)
             
             # Encode state
-            z_t = self.manager_encoder(obs)
+            z_t = self.state_encoder(obs)
             
             # Worker action
             action, log_prob, value = self.get_worker_action_and_value(
@@ -128,7 +133,7 @@ class HierarchicalAgent:
             pooled_goals = pooled_goals.unsqueeze(0).to(self.device)
             
             # Encode state
-            z_t = self.manager_encoder(obs)
+            z_t = self.state_encoder(obs)
             
             # Worker deterministic action
             action_logits = self.worker_policy(z_t, pooled_goals)
@@ -147,7 +152,7 @@ class HierarchicalAgent:
         """Encode observation to latent space"""
         with torch.no_grad():
             obs = obs.unsqueeze(0).to(self.device)
-            return self.manager_encoder(obs).squeeze(0)
+            return self.state_encoder(obs).squeeze(0)
     
     def compute_intrinsic_reward(self, encoded_state_history: List[torch.Tensor], 
                                 pooled_goal_history: List[torch.Tensor], step: int, c: int) -> float:
@@ -235,119 +240,136 @@ class HierarchicalAgent:
     
     def update_manager(self, buffer: HierarchicalPPOBuffer) -> Dict:
         """Update manager using transition-policy gradient with proper FuN objective."""
-        batch = buffer.get_manager_batch()
-        states = batch['states']
-        goals = batch['goals']
-        values = batch['values']
-        rewards = batch['rewards']
-        dones = batch['dones']
+        # Get manager batch data from buffer
+        manager_data = buffer.get_manager_batch()
+        values = manager_data['values']
+        rewards = manager_data['rewards']
+        dones = manager_data['dones']
+        observations = manager_data['observations']  # Raw observations for re-encoding
         
         # Compute GAE advantages and returns
         advantages, returns = PPOUpdater.compute_gae_advantages(
             rewards, values, dones, self.gamma_manager, self.gae_lambda
         )
-        pred_goals = self.manager_policy(states)
-        pred_values = self.manager_value(states).squeeze(-1)
-        value_loss = F.mse_loss(pred_values, returns)
         
-        # Compute cosine similarity between predicted goals and actual goals
-        cosine_alignment = F.cosine_similarity(pred_goals, goals, dim=1)
-        policy_loss = -torch.mean(advantages.detach() * cosine_alignment)
-       
-        # Update manager policy and value (encoder updated only with value loss)
+        # IMPORTANT: Re-encode observations and pass through manager encoder
+        # PerceptualEncoder output goes to ManagerEncoder for manager-specific processing
+        perceptual_encoded = self.state_encoder(observations)
+        manager_encoded_with_grads = self.manager_encoder(perceptual_encoded)
+        
+        # Recompute manager values with current network to get gradients (including manager encoder)
+        current_values = self.manager_value(manager_encoded_with_grads).squeeze(-1)
+        value_loss = F.mse_loss(current_values, returns)
+        
+        # Recompute manager goals with current policy to get gradients
+        current_goals = self.manager_policy(manager_encoded_with_grads)
+        
+        # For transition policy loss, use detached re-encoded states
+        # These represent actual state transitions (same as stored encoded_states but from current encoder)
+        # Only manager policy should get gradients from this loss, not encoders
+        encoded_states_detached = perceptual_encoded.detach()  # Detached = same functionality as buffer's encoded_states
+        policy_loss = PPOUpdater.transition_policy_loss(encoded_states_detached, current_goals, advantages)
+
+        # Update manager networks, manager encoder, AND perceptual encoder (from value loss)
         self.manager_policy_optimizer.zero_grad()
         self.manager_value_optimizer.zero_grad()
-        self.encoder_optimizer.zero_grad()
+        self.manager_encoder_optimizer.zero_grad()
+        self.perceptual_encoder_optimizer.zero_grad()  # Add PerceptualEncoder update
         
-        # Backward only value loss for encoder
+        # Backward pass: Both encoders get gradients from value loss, manager policy from transition loss
         value_loss.backward(retain_graph=True)
-        
-        # Backward policy loss for policy only
         policy_loss.backward()
         
         self.manager_policy_optimizer.step()
         self.manager_value_optimizer.step()
-        self.encoder_optimizer.step()
-        
-        with torch.no_grad():
-            avg_goal_norm = torch.mean(torch.norm(pred_goals, dim=1)).item()
-            avg_cosine_alignment = torch.mean(cosine_alignment).item()
-            avg_manager_reward = torch.mean(rewards).item() if len(rewards) > 0 else 0.0
+        self.manager_encoder_optimizer.step()
+        self.perceptual_encoder_optimizer.step()  # Update PerceptualEncoder too
         
         stats = {
-            'policy_loss': policy_loss.item(),
-            'value_loss': value_loss.item(),
-            'avg_goal_norm': avg_goal_norm,
-            'avg_cosine_alignment': avg_cosine_alignment,
-            'avg_manager_reward': avg_manager_reward
+            'manager_value_loss': value_loss.item(),
+            'manager_policy_loss': policy_loss.item()
         }
 
         return stats
     
-    def update_worker(self, buffer: PPOBuffer, manager_buffer: HierarchicalPPOBuffer,
-                     train_pi_iters: int = 10, train_v_iters: int = 10) -> Dict:
-        worker_data = buffer.get_batch()
+    def update_worker(self, worker_buffer: PPOBuffer, manager_buffer: HierarchicalPPOBuffer,
+                     train_pi_iters: int, train_v_iters: int) -> Dict:
+        
+        # Get worker data
+        worker_data = worker_buffer.get_batch()
         worker_rewards = worker_data['rewards']
-        batch_size = worker_data['observations'].shape[0]
+        worker_observations = worker_data['observations']  # Raw observations for re-encoding
+        
+        # Get step information from manager buffer
+        step_information = manager_buffer.get_step_information()
+        pooled_goals = step_information['pooled_goals']
+        
+        # Compute GAE advantages once (outside the loops)
+        
+        advantages, returns = PPOUpdater.compute_gae_advantages(
+            worker_rewards, worker_data['values'], worker_data['dones'], 
+            self.gamma_worker, self.gae_lambda
+        )
+        
+        # Initialize accumulators
         accumulated_policy_loss = 0.0
         accumulated_value_loss = 0.0
         accumulated_entropy = 0.0
-        pooled_goals = manager_buffer.get_worker_pooled_goals()
-        
-        # Policy update
+
+        # Policy update loop
         for _ in range(train_pi_iters):
-            batch_encoded_states = self.manager_encoder(worker_data['observations'])
-            if pooled_goals.shape[0] < batch_size:
-                last_goal = pooled_goals[-1:] if pooled_goals.shape[0] > 0 else torch.zeros(1, self.latent_dim, device=self.device)
-                missing_goals = batch_size - pooled_goals.shape[0]
-                padding_goals = last_goal.repeat(missing_goals, 1)
-                batch_pooled_goals = torch.cat([pooled_goals, padding_goals], dim=0)
-            else:
-                batch_pooled_goals = pooled_goals[:batch_size]
-            action_logits = self.worker_policy(batch_encoded_states, batch_pooled_goals)
-            values = self.worker_value(batch_encoded_states).squeeze(-1)
+            # Re-encode observations for each policy update to get fresh gradients
+            encoded_states = self.state_encoder(worker_observations)
+            
+            # Forward pass through worker policy
+            action_logits = self.worker_policy(encoded_states, pooled_goals)
             masked_logits = action_logits.clone()
             masked_logits[~worker_data['action_masks']] = float('-inf')
+            
+            # Create distribution and compute new log probabilities
             dist = torch.distributions.Categorical(logits=masked_logits)
             new_log_probs = dist.log_prob(worker_data['actions'])
-            entropy = dist.entropy().mean()
-            advantages, returns = PPOUpdater.compute_gae_advantages(
-                worker_rewards, worker_data['values'], worker_data['dones'], 
-                self.gamma_worker, self.gae_lambda
-            )
+            
+            # Compute entropy for regularization
+            entropy = PPOUpdater.compute_entropy(action_logits, worker_data['action_masks'])
+            
+            # Compute PPO policy loss
             policy_loss = PPOUpdater.ppo_policy_loss(
                 new_log_probs, worker_data['log_probs'], advantages.detach(), self.clip_ratio
             )
+            
+            # Total policy loss with entropy regularization
             total_policy_loss = policy_loss - self.entropy_coef * entropy
+            
+            # Update worker policy and perceptual encoder
             self.worker_policy_optimizer.zero_grad()
-            self.encoder_optimizer.zero_grad()
-            total_policy_loss.backward(retain_graph=True)
+            self.perceptual_encoder_optimizer.zero_grad()
+            total_policy_loss.backward()
             self.worker_policy_optimizer.step()
-            self.encoder_optimizer.step()
+            self.perceptual_encoder_optimizer.step()
+            
             accumulated_policy_loss += policy_loss.item()
             accumulated_entropy += entropy.item()
-        # Value update
+
+        # Value function update loop
         for _ in range(train_v_iters):
-            batch_encoded_states = self.manager_encoder(worker_data['observations'])
-            if pooled_goals.shape[0] < batch_size:
-                last_goal = pooled_goals[-1:] if pooled_goals.shape[0] > 0 else torch.zeros(1, self.latent_dim, device=self.device)
-                missing_goals = batch_size - pooled_goals.shape[0]
-                padding_goals = last_goal.repeat(missing_goals, 1)
-                batch_pooled_goals = torch.cat([pooled_goals, padding_goals], dim=0)
-            else:
-                batch_pooled_goals = pooled_goals[:batch_size]
-            values = self.worker_value(self.manager_encoder(worker_data['observations'])).squeeze(-1)
-            advantages, returns = PPOUpdater.compute_gae_advantages(
-                worker_rewards, worker_data['values'], worker_data['dones'], 
-                self.gamma_worker, self.gae_lambda
-            )
+            # Re-encode observations for each value update to get fresh gradients
+            encoded_states = self.state_encoder(worker_observations)
+            
+            # Forward pass through worker value function
+            values = self.worker_value(encoded_states).squeeze(-1)
             value_loss = F.mse_loss(values, returns.detach())
+            
+            # Update worker value function and perceptual encoder
             self.worker_value_optimizer.zero_grad()
-            self.encoder_optimizer.zero_grad()
+            self.perceptual_encoder_optimizer.zero_grad()
             value_loss.backward()
             self.worker_value_optimizer.step()
-            self.encoder_optimizer.step()
+            self.perceptual_encoder_optimizer.step()
+            
             accumulated_value_loss += value_loss.item()
+            
+        # Return training statistics
         stats = {
             'policy_loss': accumulated_policy_loss / train_pi_iters,
             'value_loss': accumulated_value_loss / train_v_iters,
@@ -355,19 +377,17 @@ class HierarchicalAgent:
         }
         return stats
     
-    def clear_manager_data(self, buffer: HierarchicalPPOBuffer):
-        """Clear manager data storage in the provided buffer"""
-        buffer.clear()
-    
     def save(self, path: str):
         """Save all models and training stats"""
         torch.save({
+            'perceptual_encoder_state_dict': self.state_encoder.state_dict(),
             'manager_encoder_state_dict': self.manager_encoder.state_dict(),
             'manager_policy_state_dict': self.manager_policy.state_dict(),
             'manager_value_state_dict': self.manager_value.state_dict(),
             'worker_policy_state_dict': self.worker_policy.state_dict(),
             'worker_value_state_dict': self.worker_value.state_dict(),
-            'encoder_optimizer_state_dict': self.encoder_optimizer.state_dict(),
+            'perceptual_encoder_optimizer_state_dict': self.perceptual_encoder_optimizer.state_dict(),
+            'manager_encoder_optimizer_state_dict': self.manager_encoder_optimizer.state_dict(),
             'manager_policy_optimizer_state_dict': self.manager_policy_optimizer.state_dict(),
             'manager_value_optimizer_state_dict': self.manager_value_optimizer.state_dict(),
             'worker_policy_optimizer_state_dict': self.worker_policy_optimizer.state_dict(),
@@ -393,7 +413,16 @@ class HierarchicalAgent:
         """Load all models and training stats"""
         checkpoint = torch.load(path, map_location=self.device)
         try:
-            self.manager_encoder.load_state_dict(checkpoint['manager_encoder_state_dict'])
+            # Load perceptual encoder (backward compatibility)
+            if 'perceptual_encoder_state_dict' in checkpoint:
+                self.state_encoder.load_state_dict(checkpoint['perceptual_encoder_state_dict'])
+            elif 'manager_encoder_state_dict' in checkpoint:  # Old format
+                self.state_encoder.load_state_dict(checkpoint['manager_encoder_state_dict'])
+            
+            # Load manager encoder
+            if 'manager_encoder_state_dict' in checkpoint:
+                self.manager_encoder.load_state_dict(checkpoint['manager_encoder_state_dict'])
+                
             self.manager_policy.load_state_dict(checkpoint['manager_policy_state_dict'])
             self.manager_value.load_state_dict(checkpoint['manager_value_state_dict'])
             self.worker_policy.load_state_dict(checkpoint['worker_policy_state_dict'])
@@ -405,8 +434,14 @@ class HierarchicalAgent:
             raise
         
         # Load optimizers (with backward compatibility)
-        if 'encoder_optimizer_state_dict' in checkpoint:
-            self.encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer_state_dict'])
+        if 'perceptual_encoder_optimizer_state_dict' in checkpoint:
+            self.perceptual_encoder_optimizer.load_state_dict(checkpoint['perceptual_encoder_optimizer_state_dict'])
+        elif 'encoder_optimizer_state_dict' in checkpoint:  # Old format
+            self.perceptual_encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer_state_dict'])
+            
+        if 'manager_encoder_optimizer_state_dict' in checkpoint:
+            self.manager_encoder_optimizer.load_state_dict(checkpoint['manager_encoder_optimizer_state_dict'])
+            
         self.manager_policy_optimizer.load_state_dict(checkpoint['manager_policy_optimizer_state_dict'])
         self.manager_value_optimizer.load_state_dict(checkpoint['manager_value_optimizer_state_dict'])
         self.worker_policy_optimizer.load_state_dict(checkpoint['worker_policy_optimizer_state_dict'])

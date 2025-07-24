@@ -52,7 +52,7 @@ def create_random_environments(num_envs: int, seed_base: int = 42) -> List[Flexi
     return environments
 
 def train_flat_rl(training_rl_envs: List[RLEnv], test_environments: List[FlexibleJobShopDataHandler], 
-                  config_params: Dict, use_curriculum: bool = True) -> Dict[str, Any]:
+                  config_params: Dict, use_curriculum: bool = True, project_name: str = None) -> Dict[str, Any]:
     """Train flat RL with or without curriculum learning"""
     
     flat_trainer = FlatRLTrainer(
@@ -68,7 +68,8 @@ def train_flat_rl(training_rl_envs: List[RLEnv], test_environments: List[Flexibl
         clip_ratio=config_params['rl_params']['clip_ratio'],
         entropy_coef=config_params['rl_params']['entropy_coef'],
         device='auto',
-        model_save_dir=config_params['result_dirs']['model']
+        model_save_dir=config_params['result_dirs']['model'],
+        project_name=project_name or config_params.get('wandb_project', None)
     )
     
     if use_curriculum:
@@ -96,7 +97,7 @@ def train_flat_rl(training_rl_envs: List[RLEnv], test_environments: List[Flexibl
     }
 
 def train_hierarchical_rl(training_rl_envs: List[RLEnv], test_environments: List[FlexibleJobShopDataHandler], 
-                         config_params: Dict, use_curriculum: bool = True) -> Dict[str, Any]:
+                         config_params: Dict, use_curriculum: bool = True, project_name: str = None) -> Dict[str, Any]:
     """Train hierarchical RL with or without curriculum learning"""
     
     hierarchical_trainer = HierarchicalRLTrainer(
@@ -115,9 +116,10 @@ def train_hierarchical_rl(training_rl_envs: List[RLEnv], test_environments: List
         gae_lambda=config_params['rl_params']['gae_lambda'],
         train_pi_iters=config_params['rl_params']['train_pi_iters'],
         train_v_iters=config_params['rl_params']['train_v_iters'],
-        alpha=config_params['rl_params']['alpha'],
+        intrinsic_reward_scale=config_params['rl_params']['intrinsic_reward_scale'],
         device='auto',
-        model_save_dir=config_params['result_dirs']['model']
+        model_save_dir=config_params['result_dirs']['model'],
+        project_name=project_name or config_params.get('wandb_project', None)
     )
     
     if use_curriculum:
@@ -220,7 +222,7 @@ def create_testing_performance_table(all_results: Dict[str, Dict]) -> pd.DataFra
     
     return testing_table
 
-def run_generalization_experiment(training_envs: int, test_envs: int, epochs: int = 20):
+def run_generalization_experiment(training_envs: int, test_envs: int, epochs: int = 20, project_name: str = "exp_generalization"):
     """Main experiment function testing both curriculum and non-curriculum approaches"""
     print("Starting Comprehensive Generalization Experiment...")
     print("Testing: Curriculum Learning vs Single Environment Training")
@@ -245,6 +247,17 @@ def run_generalization_experiment(training_envs: int, test_envs: int, epochs: in
     flat_config = config.get_flat_rl_config()
     hierarchical_config = config.get_hierarchical_rl_config()
     
+    # Prepend 'result' and project_name to result_dirs for a clean structure
+    for cfg in [flat_config, hierarchical_config]:
+        for k in cfg['result_dirs']:
+            # Only prepend if not already present
+            if not cfg['result_dirs'][k].startswith(f"result/{project_name}"):
+                # Remove leading 'result/' if present to avoid duplication
+                rel_path = cfg['result_dirs'][k]
+                if rel_path.startswith('result/'):
+                    rel_path = rel_path[len('result/'):]
+                cfg['result_dirs'][k] = os.path.join('result', project_name, rel_path)
+    
     # Override epochs with the provided value
     flat_config['rl_params']['epochs'] = epochs
     hierarchical_config['rl_params']['epochs'] = epochs
@@ -267,7 +280,7 @@ def run_generalization_experiment(training_envs: int, test_envs: int, epochs: in
     config.setup_directories(flat_config_cl['result_dirs'])
     
     all_results['Flat RL (Curriculum)'] = train_flat_rl(
-        training_rl_envs, test_environments, flat_config_cl, use_curriculum=True
+        training_rl_envs, test_environments, flat_config_cl, use_curriculum=True, project_name=project_name or flat_config_cl.get('wandb_project', None)
     )
     
     # ============= EXPERIMENT 2: FLAT RL WITH SINGLE ENVIRONMENT =============
@@ -282,7 +295,7 @@ def run_generalization_experiment(training_envs: int, test_envs: int, epochs: in
     config.setup_directories(flat_config_single['result_dirs'])
     
     all_results['Flat RL (Single Env)'] = train_flat_rl(
-        training_rl_envs, test_environments, flat_config_single, use_curriculum=False
+        training_rl_envs, test_environments, flat_config_single, use_curriculum=False, project_name=project_name or flat_config_single.get('wandb_project', None)
     )
     
     # ============= EXPERIMENT 3: HIERARCHICAL RL WITH CURRICULUM LEARNING =============
@@ -297,7 +310,7 @@ def run_generalization_experiment(training_envs: int, test_envs: int, epochs: in
     config.setup_directories(hierarchical_config_cl['result_dirs'])
     
     all_results['Hierarchical RL (Curriculum)'] = train_hierarchical_rl(
-        training_rl_envs, test_environments, hierarchical_config_cl, use_curriculum=True
+        training_rl_envs, test_environments, hierarchical_config_cl, use_curriculum=True, project_name=project_name or hierarchical_config_cl.get('wandb_project', None)
     )
     
     # ============= EXPERIMENT 4: HIERARCHICAL RL WITH SINGLE ENVIRONMENT =============
@@ -312,7 +325,7 @@ def run_generalization_experiment(training_envs: int, test_envs: int, epochs: in
     config.setup_directories(hierarchical_config_single['result_dirs'])
     
     all_results['Hierarchical RL (Single Env)'] = train_hierarchical_rl(
-        training_rl_envs, test_environments, hierarchical_config_single, use_curriculum=False
+        training_rl_envs, test_environments, hierarchical_config_single, use_curriculum=False, project_name=project_name or hierarchical_config_single.get('wandb_project', None)
     )
     
     # ============= RESULTS ANALYSIS =============
@@ -333,8 +346,10 @@ def run_generalization_experiment(training_envs: int, test_envs: int, epochs: in
     print(testing_table.to_string(index=False))
     
     # Save results to CSV
-    training_csv_path = 'training_performance_results.csv'
-    testing_csv_path = 'testing_performance_results.csv'
+    result_project_dir = os.path.join('result', project_name)
+    os.makedirs(result_project_dir, exist_ok=True)
+    training_csv_path = os.path.join(result_project_dir, 'training_performance_results.csv')
+    testing_csv_path = os.path.join(result_project_dir, 'testing_performance_results.csv')
     
     training_table.to_csv(training_csv_path, index=False)
     testing_table.to_csv(testing_csv_path, index=False)
@@ -351,5 +366,4 @@ if __name__ == "__main__":
     # Activate conda environment (as per user rules)
     print("Remember to activate conda environment: conda activate dfjs")
     
-    # Run the experiment with 800 epochs for full training
-    all_results, training_table, testing_table = run_generalization_experiment(training_envs=5, test_envs=30, epochs=800)
+    all_results, training_table, testing_table = run_generalization_experiment(training_envs=5, test_envs=30, epochs=700, project_name="5_test_envs_700_epochs")

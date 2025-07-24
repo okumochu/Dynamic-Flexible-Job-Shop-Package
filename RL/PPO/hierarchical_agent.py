@@ -73,17 +73,6 @@ class HierarchicalAgent:
         # Worker optimizers (without encoder parameters)
         self.worker_policy_optimizer = optim.Adam(self.worker_policy.parameters(), lr=worker_lr)
         self.worker_value_optimizer = optim.Adam(self.worker_value.parameters(), lr=worker_lr)
-        
-        # Training statistics
-        self.training_stats = {
-            'manager_policy_loss': [],
-            'manager_value_loss': [],
-            'worker_policy_loss': [],
-            'worker_value_loss': [],
-            'worker_entropy': [],
-            'avg_goal_norm': [],
-            'avg_manager_reward': []
-        }
     
     def get_manager_goal(self, z_t: torch.Tensor) -> torch.Tensor:
         """Get manager goal for current encoded state"""
@@ -130,7 +119,7 @@ class HierarchicalAgent:
             
             return int(action.item()), float(log_prob.item()), float(value.item())
     
-    def get_deterministic_action(self, obs: torch.Tensor, action_mask: torch.Tensor,
+    def get_deterministic_action(self, obs: torch.Tensor, action_mask: Optional[torch.Tensor],
                                 pooled_goals: torch.Tensor) -> int:
         """Get deterministic action for evaluation"""
         with torch.no_grad():
@@ -160,8 +149,8 @@ class HierarchicalAgent:
             obs = obs.unsqueeze(0).to(self.device)
             return self.manager_encoder(obs).squeeze(0)
     
-    def compute_intrinsic_reward(self, encoded_states: List[torch.Tensor], 
-                                goals: List[torch.Tensor], step: int, c: int) -> float:
+    def compute_intrinsic_reward(self, encoded_state_history: List[torch.Tensor], 
+                                pooled_goal_history: List[torch.Tensor], step: int, c: int) -> float:
         """
         Compute FuN-style intrinsic reward: average cosine similarity between 
         encoded state differences and pooled goals over the last c steps.
@@ -178,43 +167,32 @@ class HierarchicalAgent:
         Returns:
             Intrinsic reward as float
         """
-        if step < c or len(encoded_states) <= step or len(goals) == 0:
-            return 0.0
         
-        current_state = encoded_states[step]
+        # Calculate cosine similarity for each of the last at most c steps
         cosine_sims = []
-        
-        # Calculate cosine similarity for each of the last c steps
-        for i in range(1, min(c + 1, step + 1)):
-            past_step_idx = step - i
-            if past_step_idx < 0 or past_step_idx >= len(encoded_states):
+        last_state = None
+        for state, pooled_goal in zip(encoded_state_history, pooled_goal_history):
+            
+            # skip the first step of the episode
+            if last_state is None:
+                last_state = state
                 continue
                 
-            past_state = encoded_states[past_step_idx]
-            state_diff = current_state - past_state
-            
-            # Get pooled goal for this timestep
-            pooled_goal = self.pool_goals(goals, step, c)
-            
-            # Avoid zero norm vectors
-            if torch.norm(state_diff) < 1e-8 or torch.norm(pooled_goal) < 1e-8:
-                cosine_sims.append(0.0)
-                continue
-            
-            # Compute cosine similarity between state difference and pooled goal
-            cosine_sim = F.cosine_similarity(state_diff.unsqueeze(0), pooled_goal.unsqueeze(0))
-            cosine_sims.append(cosine_sim.item())
-        
+            state_diff = state - last_state
+            cosine_sim = F.cosine_similarity(state_diff.unsqueeze(0), pooled_goal.unsqueeze(0)).item()
+            cosine_sims.append(cosine_sim)
+
         # Return average cosine similarity over the last c steps
         return sum(cosine_sims) / len(cosine_sims) if cosine_sims else 0.0
     
-    def pool_goals(self, goals: List[torch.Tensor], step: int, c: int) -> torch.Tensor:
+    def pool_goals(self, last_goal: Optional[torch.Tensor], current_goal: torch.Tensor, step: int, c: int) -> torch.Tensor:
         """
         Pool goals using linear interpolation for smoother transitions in latent space.
         Each goal is active for exactly c steps.
         
         Args:
-            goals: List of goal tensors in latent space (latent_dim)
+            last_goal: Last goal tensor in latent space (latent_dim)
+            current_goal: Current goal tensor in latent space (latent_dim)
             step: Current timestep
             c: Goal duration
             
@@ -222,73 +200,41 @@ class HierarchicalAgent:
             pooled_goal: Interpolated goal in latent space (latent_dim)
                         Will be transformed via bias-free linear layer in WorkerPolicy
         """
-        # FIX: Better handling of empty goals
-        if not goals:
-            return torch.zeros(self.latent_dim, device=self.device)
-
-        if len(goals) == 1:
-            # Only one goal available, use it
-            return goals[0]
         
-        # Determine which goal period we're in
-        goal_period = step // c
-        
-        # If we're still in the first goal period, use the first goal
-        if goal_period == 0 or goal_period >= len(goals):
-            return goals[min(goal_period, len(goals) - 1)]
-        
-        # FIX: Correct interpolation between current and previous goal
-        if goal_period < len(goals):
-            current_goal = goals[goal_period]
-            prev_goal = goals[goal_period - 1]
-            
+        # If it is first c step, then use the current goal without pooling
+        if last_goal is None:
+            return current_goal
+        else:          
             # Position within the current goal period (0 to c-1)
-            step_in_period = step % c
+            step_in_c_steps = step % c
             
             # Interpolation weight: starts at 0 (use prev_goal) and goes to 1 (use current_goal)
-            alpha = step_in_period / c
+            alpha = step_in_c_steps / c
             
             # Smoothly transition from previous goal to current goal
-            pooled_goal = (1 - alpha) * prev_goal + alpha * current_goal
+            pooled_goal = (1 - alpha) * last_goal + alpha * current_goal
             
             return pooled_goal
-        else:
-            # Beyond available goals, use the last goal
-            return goals[-1]
+
     
-    def compute_manager_reward(self, encoded_states_over_period: List[torch.Tensor], 
-                                           goal: torch.Tensor) -> float:
+    def compute_manager_reward(self, s_t: Optional[torch.Tensor], s_t_plus_c: torch.Tensor, g_t: Optional[torch.Tensor]) -> float:
         """
         Compute manager reward based on cosine similarity between state change and goal.
         """
-        if len(encoded_states_over_period) < 2:
+        # If s_t is None, means it is the first step, so reward is 0
+        if s_t is None:
             return 0.0
-        
-        # Get state transition and goal
-        s_t = encoded_states_over_period[0]
-        s_t_plus_c = encoded_states_over_period[-1]
-        g_t = goal
-        
-        # State transition vector
-        state_diff = s_t_plus_c - s_t
-        
-        # FIX: Check for zero norm vectors
-        if torch.norm(state_diff) < 1e-8 or torch.norm(g_t) < 1e-8:
-            return 0.0
-        
-        # Cosine similarity is used as the reward signal
-        with torch.no_grad():
-            cosine_sim = F.cosine_similarity(state_diff.unsqueeze(0), g_t.unsqueeze(0))
-            return cosine_sim.item()
+        else:
+            with torch.no_grad():
+                # State transition vector
+                state_diff = s_t_plus_c - s_t
+                
+                # Cosine similarity is used as the reward signal
+                cosine_sim = F.cosine_similarity(state_diff.unsqueeze(0), g_t.unsqueeze(0))
+                return cosine_sim.item()
     
     def update_manager(self, buffer: HierarchicalPPOBuffer) -> Dict:
         """Update manager using transition-policy gradient with proper FuN objective."""
-        if buffer.manager_size == 0:
-            return {'policy_loss': 0.0, 'value_loss': 0.0, 
-                   'avg_goal_norm': 0.0, 'avg_cosine_alignment': 0.0,
-                   'avg_manager_reward': 0.0}
-        
-        # Get batch from buffer
         batch = buffer.get_manager_batch()
         states = batch['states']
         goals = batch['goals']
@@ -296,43 +242,36 @@ class HierarchicalAgent:
         rewards = batch['rewards']
         dones = batch['dones']
         
-        # Compute advantages for manager using PPOUpdater
+        # Compute GAE advantages and returns
         advantages, returns = PPOUpdater.compute_gae_advantages(
             rewards, values, dones, self.gamma_manager, self.gae_lambda
         )
-        
-        # Forward pass through manager (encoder is detached from gradients here)
-        with torch.no_grad():
-            encoded_states = self.manager_encoder(states)
-        
-        pred_goals = self.manager_policy(encoded_states)
-        pred_values = self.manager_value(encoded_states).squeeze(-1)
-        
-        # FuN-style policy gradient loss: E[A^M_t · ∇_θ cos(st+c − st, gt)]
-        cosine_alignment = F.cosine_similarity(pred_goals, goals, dim=1)
-        policy_loss = -torch.mean(advantages.detach() * cosine_alignment)
-        
-        # Value loss
+        pred_goals = self.manager_policy(states)
+        pred_values = self.manager_value(states).squeeze(-1)
         value_loss = F.mse_loss(pred_values, returns)
         
-        # Combined manager loss (encoder is NOT updated here)
-        total_manager_loss = policy_loss + value_loss
-        
-        # --- Update ONLY manager policy and value (NOT encoder) ---
+        # Compute cosine similarity between predicted goals and actual goals
+        cosine_alignment = F.cosine_similarity(pred_goals, goals, dim=1)
+        policy_loss = -torch.mean(advantages.detach() * cosine_alignment)
+       
+        # Update manager policy and value (encoder updated only with value loss)
         self.manager_policy_optimizer.zero_grad()
         self.manager_value_optimizer.zero_grad()
+        self.encoder_optimizer.zero_grad()
         
-        total_manager_loss.backward()
+        # Backward only value loss for encoder
+        value_loss.backward(retain_graph=True)
+        
+        # Backward policy loss for policy only
+        policy_loss.backward()
         
         self.manager_policy_optimizer.step()
         self.manager_value_optimizer.step()
+        self.encoder_optimizer.step()
         
-        # Statistics
         with torch.no_grad():
             avg_goal_norm = torch.mean(torch.norm(pred_goals, dim=1)).item()
             avg_cosine_alignment = torch.mean(cosine_alignment).item()
-            
-            # Manager reward statistics
             avg_manager_reward = torch.mean(rewards).item() if len(rewards) > 0 else 0.0
         
         stats = {
@@ -342,115 +281,78 @@ class HierarchicalAgent:
             'avg_cosine_alignment': avg_cosine_alignment,
             'avg_manager_reward': avg_manager_reward
         }
-        
-        # Update training stats
-        for key, value in stats.items():
-            if f'manager_{key}' in self.training_stats:
-                self.training_stats[f'manager_{key}'].append(value)
-        
+
         return stats
     
-    def update_worker(self, buffer: PPOBuffer, pooled_goals: torch.Tensor,
+    def update_worker(self, buffer: PPOBuffer, manager_buffer: HierarchicalPPOBuffer,
                      train_pi_iters: int = 10, train_v_iters: int = 10) -> Dict:
-        """
-        Update worker using PPO with mixed rewards (extrinsic + intrinsic).
-        The encoder is updated ONLY through worker's loss.
-        """
         worker_data = buffer.get_batch()
-        
-        if worker_data['observations'].shape[0] == 0:
-            return {'policy_loss': 0.0, 'value_loss': 0.0, 'entropy': 0.0}
-        
-        # Use the actual rewards from buffer (already contain extrinsic + intrinsic mix)
         worker_rewards = worker_data['rewards']
         batch_size = worker_data['observations'].shape[0]
-        
-        # Standard PPO update for worker using PPOUpdater
         accumulated_policy_loss = 0.0
         accumulated_value_loss = 0.0
         accumulated_entropy = 0.0
+        pooled_goals = manager_buffer.get_worker_pooled_goals()
         
-        num_updates = train_pi_iters
-
-        for _ in range(num_updates):
-            # Fresh forward pass for each update iteration (encoder gradients enabled)
+        # Policy update
+        for _ in range(train_pi_iters):
             batch_encoded_states = self.manager_encoder(worker_data['observations'])
-            
-            # FIX: Use proper batch size matching for pooled goals
-            batch_size = worker_data['observations'].shape[0]
-            
-            # Ensure pooled_goals matches the worker batch size
             if pooled_goals.shape[0] < batch_size:
-                # Repeat the last pooled goal if we have fewer pooled goals than worker experiences
                 last_goal = pooled_goals[-1:] if pooled_goals.shape[0] > 0 else torch.zeros(1, self.latent_dim, device=self.device)
                 missing_goals = batch_size - pooled_goals.shape[0]
                 padding_goals = last_goal.repeat(missing_goals, 1)
                 batch_pooled_goals = torch.cat([pooled_goals, padding_goals], dim=0)
             else:
-                # Use exactly the number of pooled goals we need
                 batch_pooled_goals = pooled_goals[:batch_size]
-            
-            # Get worker predictions
             action_logits = self.worker_policy(batch_encoded_states, batch_pooled_goals)
-            
-            # Worker value estimation
             values = self.worker_value(batch_encoded_states).squeeze(-1)
-            
-            # Apply action mask
             masked_logits = action_logits.clone()
             masked_logits[~worker_data['action_masks']] = float('-inf')
-            
-            # Create distribution and get log probabilities
             dist = torch.distributions.Categorical(logits=masked_logits)
             new_log_probs = dist.log_prob(worker_data['actions'])
             entropy = dist.entropy().mean()
-
-            # Compute advantages using GAE from PPOUpdater
             advantages, returns = PPOUpdater.compute_gae_advantages(
                 worker_rewards, worker_data['values'], worker_data['dones'], 
                 self.gamma_worker, self.gae_lambda
             )
-            
-            # PPO policy loss using PPOUpdater
             policy_loss = PPOUpdater.ppo_policy_loss(
                 new_log_probs, worker_data['log_probs'], advantages.detach(), self.clip_ratio
             )
-            
-            # Total policy loss
             total_policy_loss = policy_loss - self.entropy_coef * entropy
-            
-            # Value loss
-            value_loss = F.mse_loss(values, returns.detach())
-            
-            # Combined loss for all worker components INCLUDING encoder
-            total_loss = total_policy_loss + value_loss
-            
-            # --- Update worker components AND encoder together ---
             self.worker_policy_optimizer.zero_grad()
-            self.worker_value_optimizer.zero_grad()
-            self.encoder_optimizer.zero_grad()  # Encoder updated with worker
-            
-            total_loss.backward()
-            
+            self.encoder_optimizer.zero_grad()
+            total_policy_loss.backward(retain_graph=True)
             self.worker_policy_optimizer.step()
-            self.worker_value_optimizer.step()
-            self.encoder_optimizer.step()  # Encoder updated with worker
-            
+            self.encoder_optimizer.step()
             accumulated_policy_loss += policy_loss.item()
-            accumulated_value_loss += value_loss.item()
             accumulated_entropy += entropy.item()
-
+        # Value update
+        for _ in range(train_v_iters):
+            batch_encoded_states = self.manager_encoder(worker_data['observations'])
+            if pooled_goals.shape[0] < batch_size:
+                last_goal = pooled_goals[-1:] if pooled_goals.shape[0] > 0 else torch.zeros(1, self.latent_dim, device=self.device)
+                missing_goals = batch_size - pooled_goals.shape[0]
+                padding_goals = last_goal.repeat(missing_goals, 1)
+                batch_pooled_goals = torch.cat([pooled_goals, padding_goals], dim=0)
+            else:
+                batch_pooled_goals = pooled_goals[:batch_size]
+            values = self.worker_value(self.manager_encoder(worker_data['observations'])).squeeze(-1)
+            advantages, returns = PPOUpdater.compute_gae_advantages(
+                worker_rewards, worker_data['values'], worker_data['dones'], 
+                self.gamma_worker, self.gae_lambda
+            )
+            value_loss = F.mse_loss(values, returns.detach())
+            self.worker_value_optimizer.zero_grad()
+            self.encoder_optimizer.zero_grad()
+            value_loss.backward()
+            self.worker_value_optimizer.step()
+            self.encoder_optimizer.step()
+            accumulated_value_loss += value_loss.item()
         stats = {
-            'policy_loss': accumulated_policy_loss / num_updates,
-            'value_loss': accumulated_value_loss / num_updates,
-            'entropy': accumulated_entropy / num_updates
+            'policy_loss': accumulated_policy_loss / train_pi_iters,
+            'value_loss': accumulated_value_loss / train_v_iters,
+            'entropy': accumulated_entropy / train_pi_iters
         }
-        
-        # Update training stats
-        for key, value in stats.items():
-            if f'worker_{key}' in self.training_stats:
-                self.training_stats[f'worker_{key}'].append(value)
-        
         return stats
     
     def clear_manager_data(self, buffer: HierarchicalPPOBuffer):
@@ -470,7 +372,7 @@ class HierarchicalAgent:
             'manager_value_optimizer_state_dict': self.manager_value_optimizer.state_dict(),
             'worker_policy_optimizer_state_dict': self.worker_policy_optimizer.state_dict(),
             'worker_value_optimizer_state_dict': self.worker_value_optimizer.state_dict(),
-            'training_stats': self.training_stats,
+            
             # Save configuration parameters
             'input_dim': self.input_dim,
             'action_dim': self.action_dim,
@@ -509,7 +411,6 @@ class HierarchicalAgent:
         self.manager_value_optimizer.load_state_dict(checkpoint['manager_value_optimizer_state_dict'])
         self.worker_policy_optimizer.load_state_dict(checkpoint['worker_policy_optimizer_state_dict'])
         self.worker_value_optimizer.load_state_dict(checkpoint['worker_value_optimizer_state_dict'])
-        self.training_stats = checkpoint['training_stats']
         
         # Load goal_duration if available (for backward compatibility)
         if 'goal_duration' in checkpoint:

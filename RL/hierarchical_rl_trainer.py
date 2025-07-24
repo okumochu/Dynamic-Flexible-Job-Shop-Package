@@ -16,6 +16,8 @@ from RL.PPO.buffer import PPOBuffer, HierarchicalPPOBuffer
 from RL.PPO.hierarchical_agent import HierarchicalAgent
 from RL.rl_env import RLEnv
 from typing import Dict, Optional, List
+from collections import deque
+
 
 
 class HierarchicalRLTrainer:
@@ -74,13 +76,6 @@ class HierarchicalRLTrainer:
         # Create save directory
         os.makedirs(model_save_dir, exist_ok=True)
         
-        # Training history (simplified - only episode metrics)
-        self.training_history = {
-            'episode_makespans': [],
-            'episode_twts': [],
-            'episode_objectives': []
-        }
-        
         print(f"Hierarchical RL Trainer initialized")
         print(f"Manager goal duration: {goal_duration}, Latent dim: {latent_dim}, Goal dim: {goal_dim}")
     
@@ -119,58 +114,45 @@ class HierarchicalRLTrainer:
         
         # Reset episode-specific data at the start of each epoch
         episode_steps = 0
-        goals_history = []
-        encoded_states_history = []
-        ep_reward = 0
-        
-        # Track episode metrics for this epoch
-        epoch_episodes = []
+        last_goal = None
+        current_goal = None
+        pooled_goal_history = deque(maxlen=self.goal_duration)  # queue with c slots
+        encoded_state_history = deque(maxlen=self.goal_duration)  # queue with c slots
+        last_encoded_state = None
+        current_encoded_state = None        
 
         for t in range(self.steps_per_epoch):
             
             # Encode state
             z_t = self.agent.encode_state(obs)
-            encoded_states_history.append(z_t)
+            current_encoded_state = z_t
+            encoded_state_history.append(current_encoded_state)
             
             # Manager decision every goal_duration steps (starting from step 0)
             if episode_steps % self.goal_duration == 0:
-                goal = self.agent.get_manager_goal(z_t)
+                current_goal = self.agent.get_manager_goal(z_t)
 
-                goals_history.append(goal)
+                # if it is first step then reward is 0
+                manager_reward = self.agent.compute_manager_reward(s_t = last_encoded_state, s_t_plus_c = current_encoded_state, g_t = last_goal)
+                            
+                # Get manager value for the start state of the finished period 
+                manager_value = self.agent.manager_value(current_encoded_state.unsqueeze(0)).item()
+                            
+                # Add manager transition for the completed period
+                manager_buffer.add_manager_transition(
+                    current_encoded_state,
+                    current_goal,
+                    manager_reward,
+                    manager_value, 
+                    False  # Episode not done
+                )
                 
-                # FIX: Add manager transition for PREVIOUS goal period when starting a NEW goal
-                # Only after we've completed at least one full goal period
-                if len(goals_history) >= 2:
-                    # Get the goal that just finished (previous goal)
-                    finished_goal = goals_history[-2]
-                    
-                    # Get states from the period that just finished
-                    period_start = max(0, episode_steps - self.goal_duration)
-                    period_end = episode_steps
-                    
-                    # FIX: Ensure we have valid state history for this period
-                    if period_start < len(encoded_states_history) and period_end <= len(encoded_states_history):
-                        period_states = encoded_states_history[period_start:period_end]
-                        
-                        if len(period_states) >= 2:  # Need at least start and end state
-                            manager_reward = self.agent.compute_manager_reward(period_states, finished_goal)
-                            
-                            # Get manager value for the start state of the finished period
-                            with torch.no_grad():
-                                start_state = period_states[0]
-                                manager_value = self.agent.manager_value(start_state.unsqueeze(0)).item()
-                            
-                            # Add manager transition for the completed period
-                            manager_buffer.add_manager_transition(
-                                start_state,
-                                finished_goal,
-                                manager_reward,
-                                manager_value, 
-                                False  # Episode not done
-                            )
+                # Update last goal
+                last_goal = current_goal
             
-            # Pool goals for worker (this happens every step)
-            pooled_goal = self.agent.pool_goals(goals_history, episode_steps, self.goal_duration)
+            # Pool goals for worker every step
+            pooled_goal = self.agent.pool_goals(last_goal, current_goal, episode_steps, self.goal_duration)
+            pooled_goal_history.append(pooled_goal)
             
             # Add pooled goal to buffer for worker updates
             manager_buffer.add_step_data(pooled_goal)
@@ -184,55 +166,31 @@ class HierarchicalRLTrainer:
             done = terminated or truncated
             next_obs = torch.tensor(next_obs, dtype=torch.float32, device=self.agent.device)
 
-            # Intrinsic reward (with better bounds checking from agent)
+            # Intrinsic reward
             reward_int = self.agent.compute_intrinsic_reward(
-                encoded_states_history, goals_history, episode_steps, self.goal_duration
+                encoded_state_history, pooled_goal_history, episode_steps, self.goal_duration
             )
             reward_mixed = reward_ext + self.intrinsic_reward_scale * reward_int
             
             # Store worker experience
-            worker_buffer.add(obs, action, reward_mixed, worker_value, log_prob, action_mask, done)
-            ep_reward += reward_ext
-                            
+            worker_buffer.add(obs, action, reward_mixed, worker_value, log_prob, action_mask, done)                            
             obs = next_obs
+            last_encoded_state = current_encoded_state
             episode_steps += 1
             
             if done:
-                # FIX: Handle final manager transition if we have a complete goal period
-                if (len(goals_history) >= 1 and 
-                    len(encoded_states_history) >= self.goal_duration):
-                    
-                    # Find the last complete goal period
-                    last_goal_start = (len(goals_history) - 1) * self.goal_duration
-                    if last_goal_start < len(encoded_states_history):
-                        final_states = encoded_states_history[last_goal_start:]
-                        if len(final_states) >= 2:
-                            final_goal = goals_history[-1]
-                            final_reward = self.agent.compute_manager_reward(final_states, final_goal)
-                            
-                            with torch.no_grad():
-                                final_value = self.agent.manager_value(final_states[0].unsqueeze(0)).item()
-                            
-                            manager_buffer.add_manager_transition(
-                                final_states[0],
-                                final_goal,
-                                final_reward,
-                                final_value,
-                                True  # Episode done
-                            )
+                final_reward = self.agent.compute_manager_reward(last_encoded_state, current_encoded_state, last_goal)
                 
-                # Collect episode metrics for later aggregation
-                epoch_episodes.append({
-                    'objective': info['objective'],
-                    'makespan': info['makespan'],
-                    'twt': info['twt'],
-                    'reward': ep_reward
-                })
+                with torch.no_grad():
+                    final_value = self.agent.manager_value(current_encoded_state.unsqueeze(0)).item()
                 
-                self.training_history['episode_rewards'].append(ep_reward)
-                self.training_history['episode_makespans'].append(info['makespan'])
-                self.training_history['episode_twts'].append(info['twt'])
-                self.training_history['episode_objectives'].append(info['objective'])
+                manager_buffer.add_manager_transition(
+                    current_encoded_state,
+                    current_goal,
+                    final_reward,
+                    final_value,
+                    True  # Episode done
+                )
                 
                 # Log individual episode metrics for real-time monitoring
                 if wandb.run is not None:
@@ -245,26 +203,9 @@ class HierarchicalRLTrainer:
                 # Reset for new episode
                 obs, _ = current_env.reset()
                 obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
-                ep_reward = 0
                 episode_steps = 0
-                goals_history = []
-                encoded_states_history = []
-        
-        # Return aggregated episode metrics for this epoch
-        if epoch_episodes:
-            return {
-                'mean_makespan': np.mean([ep['makespan'] for ep in epoch_episodes]),
-                'mean_twt': np.mean([ep['twt'] for ep in epoch_episodes]),
-                'mean_objective': np.mean([ep['objective'] for ep in epoch_episodes]),
-                'num_episodes': len(epoch_episodes)
-            }
-        else:
-            return {
-                'mean_makespan': 0.0,
-                'mean_twt': 0.0,
-                'mean_objective': 0.0,
-                'num_episodes': 0
-            }
+                pooled_goal_history.clear()
+                encoded_state_history.clear()
 
     def train(self, env_or_envs=None, test_environments=None, test_interval=50):
         """
@@ -320,15 +261,12 @@ class HierarchicalRLTrainer:
 
         for epoch in pbar:
             # Collect rollout data
-            epoch_metrics = self.collect_rollout(env_or_envs, worker_buffer, manager_buffer, epoch)
-            
-            # --- End of inner loop (data collection) ---
-            
+            self.collect_rollout(env_or_envs, worker_buffer, manager_buffer, epoch)
+                        
             # Update after collecting steps_per_epoch data
-            pooled_goals = manager_buffer.get_hierarchical_data()
             manager_stats = self.agent.update_manager(manager_buffer)
             worker_stats = self.agent.update_worker(
-                worker_buffer, pooled_goals,
+                worker_buffer, manager_buffer,
                 train_pi_iters=self.train_pi_iters, train_v_iters=self.train_v_iters
             )
 
@@ -368,7 +306,6 @@ class HierarchicalRLTrainer:
 
         return {
             'training_time': time.time() - start_time,
-            'training_history': self.training_history,
             'model_filename': model_filename
         }
     
@@ -400,7 +337,6 @@ class HierarchicalRLTrainer:
         Returns:
             Dictionary containing evaluation results for each environment
         """
-        from RL.rl_env import RLEnv
         
         # Save current model temporarily
         if temp_model_name is None:

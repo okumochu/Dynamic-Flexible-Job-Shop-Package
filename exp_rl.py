@@ -8,13 +8,18 @@ from utils.policy_utils import showcase_flat_policy, create_gantt_chart, evaluat
 from config import config
 
 
-def run_flat_rl_experiment():
+def run_flat_rl_experiment(device: str = None):
     """Run flat RL experiment with centralized configuration"""
     
     print("\n" + "="*50)
     print("🤖 FLAT REINFORCEMENT LEARNING EXPERIMENT")
     print("📋 Single-Agent PPO for Job Shop Scheduling")
     print("="*50)
+    
+    # Override device if specified
+    if device is not None:
+        config.common_rl_params['device'] = device
+        print(f"Using device: {device}")
     
     # Get configuration
     exp_config = config.get_flat_rl_config()
@@ -45,6 +50,9 @@ def run_flat_rl_experiment():
         v_lr=rl_params['v_lr'],
         gamma=rl_params['gamma'],
         gae_lambda=rl_params['gae_lambda'],
+        clip_ratio=rl_params['clip_ratio'],
+        entropy_coef=rl_params['entropy_coef'],
+        device=rl_params['device'],
         project_name=exp_config['wandb_project'],
         model_save_dir=result_dirs['model']
     )
@@ -127,7 +135,12 @@ def run_flat_rl_experiment():
 
 def main():
     """Main function to run flat RL experiment"""
-    run_flat_rl_experiment()
+    import argparse
+    parser = argparse.ArgumentParser(description="Run flat RL experiment")
+    parser.add_argument('--device', type=str, default=None, help='Device for training (auto, cpu, cuda, etc.)')
+    args = parser.parse_args()
+    
+    run_flat_rl_experiment(device=args.device)
 
 
 if __name__ == "__main__":

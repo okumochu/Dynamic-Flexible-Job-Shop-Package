@@ -11,13 +11,18 @@ from utils.policy_utils import showcase_hierarchical_policy, create_gantt_chart,
 from config import config
 
 
-def run_hierarchical_rl_experiment():
+def run_hierarchical_rl_experiment(device: str = None):
     """Run hierarchical RL experiment with centralized configuration"""
     
     print("="*60)
     print("🏗️  HIERARCHICAL REINFORCEMENT LEARNING EXPERIMENT")
     print("📋 Manager-Worker Architecture for Job Shop Scheduling")
     print("="*60)
+    
+    # Override device if specified
+    if device is not None:
+        config.common_rl_params['device'] = device
+        print(f"Using device: {device}")
         
     print("\n" + "="*50)
     print("Starting hierarchical RL experiment...")
@@ -62,6 +67,7 @@ def run_hierarchical_rl_experiment():
         entropy_coef=hrl_params['entropy_coef'],
         train_pi_iters=hrl_params['train_pi_iters'],
         train_v_iters=hrl_params['train_v_iters'],
+        device=hrl_params['device'],
         project_name=exp_config['wandb_project'],
         model_save_dir=result_dirs['model']
     )
@@ -163,7 +169,12 @@ def run_hierarchical_rl_experiment():
 
 def main():
     """Main function to run hierarchical RL experiment"""
-    run_hierarchical_rl_experiment()
+    import argparse
+    parser = argparse.ArgumentParser(description="Run hierarchical RL experiment")
+    parser.add_argument('--device', type=str, default=None, help='Device for training (auto, cpu, cuda, etc.)')
+    args = parser.parse_args()
+    
+    run_hierarchical_rl_experiment(device=args.device)
 
 
 if __name__ == "__main__":

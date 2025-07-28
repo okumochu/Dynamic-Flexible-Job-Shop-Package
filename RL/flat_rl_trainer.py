@@ -43,8 +43,8 @@ class FlatRLTrainer:
         self.train_pi_iters = train_pi_iters
         self.train_v_iters = train_v_iters
         self.model_save_dir = model_save_dir
-        self.project_name = project_name if project_name is not None else "dfjs"
-        self.run_name = "_" + run_name if run_name is not None else ""
+        self.project_name = project_name
+        self.run_name = run_name
         
         # Add episode tracking
         self.episode_makespans = []
@@ -153,7 +153,7 @@ class FlatRLTrainer:
         os.makedirs(wandb_dir, exist_ok=True)
         
         wandb.init(
-            name=f"FLR_{time.strftime('%Y%m%d_%H%M')}{self.run_name}",
+            name=self.run_name,
             project=self.project_name,
             dir=wandb_dir,
             config={

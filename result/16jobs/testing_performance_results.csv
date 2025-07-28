@@ -1,0 +1,5 @@
+Method,Reward,Test
+Flat RL,Sparse,"Obj: 712.49, MS: 259.27, TWT: 4791.47"
+Flat RL,Dense,"Obj: 673.32, MS: 246.83, TWT: 4511.73"
+Hierarchical RL,Sparse,"Obj: 752.10, MS: 262.83, TWT: 5155.53"
+Hierarchical RL,Dense,"Obj: 746.92, MS: 266.70, TWT: 5068.93"

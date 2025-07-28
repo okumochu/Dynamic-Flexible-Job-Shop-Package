@@ -1,0 +1,87 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            zpn8cqdk95vlw4mheaaq0f77a4ogb4b2:
+                args:
+                    - --project_name
+                    - 16jobs
+                    - --epochs
+                    - "400"
+                    - --test_envs
+                    - "30"
+                codePath: exp_generalization.py
+                codePathLocal: exp_generalization.py
+                cpu_count: 32
+                cpu_count_logical: 64
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "588412764160"
+                        used: "307381088256"
+                email: okumochu55@gmail.com
+                executable: /home/r13725046okumo/miniconda3/envs/dfjs/bin/python
+                git:
+                    commit: 7a80e0c826e28a7f1a09828671afd742ffe37c44
+                    remote: git@github.com:okumochu/Dynamic-Flexible-Job-Shop-Package.git
+                gpu: Quadro RTX 6000
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Turing
+                      cudaCores: 4608
+                      memoryTotal: "25769803776"
+                      name: Quadro RTX 6000
+                      uuid: GPU-56f43da4-1deb-c532-3a59-75303aabf3d2
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-41575f01-33f8-a380-7e12-d3927e3fc83c
+                host: ubuntu-ProLiant-DL380-Gen10
+                memory:
+                    total: "134792536064"
+                os: Linux-6.11.0-26-generic-x86_64-with-glibc2.39
+                program: /home/r13725046okumo/project/Dynamic-Flexible-Job-Shop-Package/exp_generalization.py
+                python: CPython 3.12.11
+                root: result/16jobs/hrl_dense/hierarchical_rl/training_process
+                startedAt: "2025-07-28T06:34:48.623086Z"
+                writerId: zpn8cqdk95vlw4mheaaq0f77a4ogb4b2
+        m: []
+        python_version: 3.12.11
+        t:
+            "1":
+                - 1
+                - 105
+            "2":
+                - 1
+                - 105
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.12.11
+            "5": 0.21.0
+            "12": 0.21.0
+            "13": linux-x86_64
+entropy_coef:
+    value: 0.01
+epochs:
+    value: 400
+gamma_manager:
+    value: 0.995
+gamma_worker:
+    value: 0.95
+goal_dim:
+    value: 16
+goal_duration:
+    value: 21
+intrinsic_reward_scale:
+    value: 0.5
+latent_dim:
+    value: 128
+manager_lr:
+    value: 1e-05
+steps_per_epoch:
+    value: 256
+worker_lr:
+    value: 1e-05

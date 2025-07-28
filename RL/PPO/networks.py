@@ -81,7 +81,7 @@ class PolicyNetwork(nn.Module):
     Separate policy network for PPO agent.
     Takes observation and outputs action logits.
     """
-    def __init__(self, input_dim, action_dim, hidden_dim = 256):
+    def __init__(self, input_dim, action_dim, hidden_dim = 128):
         super().__init__()
         self.policy_network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim // 2),
@@ -135,7 +135,7 @@ Following is the hierarchical RL network.
 
 class PerceptualEncoder(nn.Module):
     
-    def __init__(self, input_dim: int, latent_dim: int, hidden_dim: int = 256):
+    def __init__(self, input_dim: int, latent_dim: int, hidden_dim: int = 128):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -246,7 +246,7 @@ class WorkerPolicy(nn.Module):
     """Worker policy network that combines PPO with goal-conditioned policy (policy only)"""
     
     def __init__(self, latent_dim: int, action_dim: int, 
-                 goal_dim: int, hidden_dim: int = 256):
+                 goal_dim: int, hidden_dim: int = 128):
         super().__init__()
         self.latent_dim = latent_dim
         self.action_dim = action_dim

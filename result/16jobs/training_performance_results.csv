@@ -1,0 +1,5 @@
+Method,Reward,Train
+Flat RL,Sparse,"Obj: 501.20, MS: 205.00, TWT: 3167.00"
+Flat RL,Dense,"Obj: 245.30, MS: 152.00, TWT: 1085.00"
+Hierarchical RL,Sparse,"Obj: 433.30, MS: 197.00, TWT: 2560.00"
+Hierarchical RL,Dense,"Obj: 454.90, MS: 197.00, TWT: 2776.00"

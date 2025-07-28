@@ -64,8 +64,8 @@ class HierarchicalAgent:
         self.worker_value = ValueNetwork(latent_dim).to(self.device)
         
         # IMPORTANT: Updated optimizer strategy
-        # 1. PerceptualEncoder: Updated by worker only (policy & value losses)
-        # 2. ManagerEncoder: Updated by manager value loss only
+        # 1. PerceptualEncoder: Updated by worker (policy & value losses) and manager (value loss)
+        # 2. ManagerEncoder: Updated by manager value loss only (no policy loss)
         self.perceptual_encoder_optimizer = optim.Adam(self.state_encoder.parameters(), lr=worker_lr)
         self.manager_encoder_optimizer = optim.Adam(self.manager_encoder.parameters(), lr=manager_lr)
         

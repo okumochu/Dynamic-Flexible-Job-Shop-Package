@@ -1,7 +1,6 @@
 from typing import List, Tuple, Dict, Optional
 import plotly.graph_objects as go
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
-import matplotlib.pyplot as plt
 import random
 
 class SolutionUtils:
@@ -107,9 +106,25 @@ class SolutionUtils:
                 prev_op = job_operations[i-1]
                 
                 if current_op.operation_id in operation_end_times and prev_op.operation_id in operation_end_times:
-                    # Use tolerance for floating-point comparisons
-                    if self._is_greater_than(operation_end_times[prev_op.operation_id], operation_end_times[current_op.operation_id]):
-                        violations.append(f"Job precedence violation in job {job_id}: operation {prev_op.operation_id} ends after {current_op.operation_id}")
+                    # Job precedence constraint: current operation must start after previous operation finishes
+                    # We need to find the start time of current_op and end time of prev_op
+                    current_start_time = None
+                    prev_end_time = operation_end_times[prev_op.operation_id]
+                    
+                    # Find start time of current operation from machine schedule
+                    for machine_id, operations in self.machine_schedule.items():
+                        for op_id, start_time in operations:
+                            if op_id == current_op.operation_id:
+                                current_start_time = start_time
+                                break
+                        if current_start_time is not None:
+                            break
+                    
+                    if current_start_time is not None:
+                        # Check if current operation starts after previous operation finishes
+                        # Use tolerance for floating-point comparisons
+                        if self._is_less_than(current_start_time, prev_end_time):
+                            violations.append(f"Job precedence violation in job {job_id}: operation {current_op.operation_id} starts before {prev_op.operation_id} finishes")
         
         # Check if all operations are scheduled
         missing_operations = set(range(self.num_operations)) - scheduled_operations
@@ -236,5 +251,4 @@ class SolutionUtils:
             legend_title_text='Job'
         )
         
-        fig.show()
         return fig

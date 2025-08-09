@@ -1,1 +1,0 @@
-{"generalization/mean_twt":9835.9,"_wandb":{"runtime":5637},"entropy":0.8228043097381791,"episode_twt":3897,"generalization/mean_objective":1313.0800000000002,"generalization/mean_makespan":366.1,"_step":1999,"_runtime":5637,"episode_makespan":270,"episode_objective":2083.5,"policy_loss":11.167186116178831,"value_loss":9788.857869466146,"_timestamp":1.7537051860892498e+09}

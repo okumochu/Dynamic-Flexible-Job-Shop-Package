@@ -1,0 +1,3 @@
+method,objective,makespan,twt,run_name
+Flat RL,46255.6,2171.8,90339.4,flat_mk08
+Hierarchical RL,42252.3,1974.2,82530.4,hrl_mk08

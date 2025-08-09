@@ -1,0 +1,1 @@
+{"_step":8764,"_wandb":{"runtime":4080},"_runtime":4080,"value_loss":9369.179244995117,"episode_performance/episode_objective":2153.5,"_timestamp":1.754453191508448e+09,"policy_loss":12.064202725887299,"entropy":0.6758293844759464,"episode_performance/episode_makespan":230,"episode_performance/episode_reward":-2153.5,"episode_performance/episode_twt":4077}

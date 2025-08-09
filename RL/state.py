@@ -3,9 +3,8 @@ FlatRLState: State management class for Flat RL Environment
 Handles state representation and observation generation
 """
 
-import torch
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, Optional
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 from benchmarks.static_benchmark.jobshop_components import Job
 
@@ -29,7 +28,7 @@ class State:
         Args:
             data_handler: FlexibleJobShopDataHandler instance
             max_jobs: Maximum jobs for padding (default: num_jobs)
-            max_machines: Maximum machines for padding (default: num_machines)
+            max_operations: Maximum operations per job for padding (default: inferred from data)
         """
         self.data_handler = data_handler
         self.jobs : Dict[int, Job] = data_handler.jobs
@@ -46,51 +45,45 @@ class State:
         self.operation_dim = max_operations if max_operations is not None else max(len(job.operations) for job in self.jobs.values())
         
         # Calculate global statistics for normalization
-        self.avg_processing_time = data_handler.get_average_processing_time()
+        self.max_processing_time = data_handler.get_max_processing_time()
         self.max_weight = data_handler.get_max_weight()
         self.max_due_date = data_handler.get_max_due_date()
+        self.max_machine_available_time = 1
+        self.max_operation_start_time = 1
     
             
         # Initialize state variables
-        self.obs_dim, self.action_dim = self.reset()
+        self.obs_dim = self.reset()
     
     def _to_numpy(self) -> np.ndarray:
-        """Convert a readable state to a flat 1D numpy array observation vector (robust, index-based)."""
+        """Convert a readable state to a flat 1D numpy array
+        Observation vector:
+        left_ops / weight / due_date / machine_available_time / process_time / operation_start_time
+        """
         job_states = self.readable_state['job_states']
         obs = []
         
-        # Calculate max machine available time and max operation start time for normalization
-        max_machine_available_time = max(
-            max(job_state['machine_available_time']) 
-            for job_state in job_states.values()
-        ) if any(job_states.values()) else 1.0
-        
-        max_operation_start_time = max(
-            max(max(op_start_times) for op_start_times in job_state['operations']['operation_start_time']) 
-            for job_state in job_states.values()
-        ) if any(job_states.values()) else 1.0
-        
-        # Avoid division by zero
-        max_machine_available_time = max(max_machine_available_time, 1.0)
-        max_operation_start_time = max(max_operation_start_time, 1.0)
-        
         for job_id in range(self.job_dim):
             v = job_states[job_id]
-            obs.append(v['left_ops']/self.operation_dim) # only left ops, current op is for recording purpose only
-            obs.append(v['weight']/self.max_weight)
+            
+            # Job-level features
+            obs.append(v['left_ops']/self.operation_dim)  # Normalized remaining operations
+            obs.append(v['weight']/self.max_weight)  # Normalized job weight
+            obs.append(v['due_date']/self.max_due_date)  # Normalized due date
+
+            # Machine available time for each machine
+            available_times = np.array(v['machine_available_time'], dtype=np.float32)
+            obs.extend(available_times / self.max_machine_available_time)
+            
             for op_pos in range(self.operation_dim):
-                # Take the minimum processing time across all machines for this operation
-                if op_pos < len(v['operations']['process_time']) and isinstance(v['operations']['process_time'][op_pos], list):
-                    compatible_proc_times = [pt for pt in v['operations']['process_time'][op_pos] if pt > 0]
-                    min_proc_time = min(compatible_proc_times) if compatible_proc_times else 0
-                    obs.append(min_proc_time / self.avg_processing_time)
-                else:
-                    obs.append(0.0) # No processing time if op doesn't exist
-                # Add operation start time for each machine (matrix representation)
-                for machine_id in range(self.machine_dim):
-                    obs.append(v['operations']['operation_start_time'][op_pos][machine_id]/max_operation_start_time)
-            for machine_id in range(self.machine_dim):
-                obs.append(v['machine_available_time'][machine_id]/max_machine_available_time)
+                # Process time for each machine
+                process_times = np.array(v['operations']['process_time'][op_pos], dtype=np.float32)
+                obs.extend(process_times / self.max_processing_time)
+                
+                # Operation start time for each machine
+                start_times = np.array(v['operations']['operation_start_time'][op_pos], dtype=np.float32)
+                obs.extend(start_times / self.max_operation_start_time)
+        
         return np.array(obs, dtype=np.float32)
     
     def reset(self):
@@ -112,7 +105,8 @@ class State:
                 # left_ops is normalized by operation_dim
                 'left_ops': 0 if padding else len(self.jobs[job_id].operations),
                 'current_op': 0,
-                'weight': 0.0 if padding else self.weights[job_id]/self.max_weight,
+                'weight': 0.0 if padding else self.weights[job_id],
+                'due_date': 0.0 if padding else self.due_dates[job_id],
                 "operations": {
                     "process_time":[],
                     "operation_start_time":[[0] * self.machine_dim for _ in range(self.operation_dim)],
@@ -121,7 +115,6 @@ class State:
                 "machine_available_time": [0] * self.machine_dim
             }
 
-            # process time and start time are normalized by machine_dim
             if padding:
                 job_states[job_id]["operations"]["process_time"] = [[0] * self.machine_dim for _ in range(self.operation_dim)]
             else:
@@ -136,18 +129,22 @@ class State:
                             if machine_id in op.compatible_machines:
                                 proc_times.append(op.get_processing_time(machine_id))
                             else:
-                                proc_times.append(0)  # Invalid/incompatible machine
+                                proc_times.append(0) 
                         job_states[job_id]["operations"]["process_time"].append(proc_times)
                     else:
                         job_states[job_id]["operations"]["process_time"].append([0] * self.machine_dim)        
+        
+        # reset for next episode
+        self.max_machine_available_time = 1
+        self.max_operation_start_time = 1
         
         self.readable_state = {
             'job_states': job_states
         }
         
         obs_dim = len(self._to_numpy())
-        action_dim = self.num_jobs * self.num_machines
-        return obs_dim, action_dim
+        # Action space is decided by each RL environment; only return obs_dim here
+        return obs_dim
     
     
     def schedule_operation(self, job_id: int, machine_id: int, start_time: float, finish_time: float):
@@ -159,6 +156,7 @@ class State:
 
         # Update operation_start_time for this operation on the specific machine
         js['operations']['operation_start_time'][op_position][machine_id] = start_time
+        self.max_operation_start_time = max(self.max_operation_start_time, start_time)
         
         # Update finish time for this operation
         js['operations']['finish_time'][op_position] = finish_time
@@ -167,19 +165,67 @@ class State:
         js['current_op'] += 1
         js['left_ops'] = js['left_ops'] - 1
 
-        # Update machine_available_time for all jobs (set finish_time for the machine)
-        # Consider constraint: machine can't start before it's available or before previous operation finishes
-        for job_idx in range(self.num_jobs):
-            job_state = job_states[job_idx]
-            job_state['machine_available_time'][machine_id] = max(
-                job_state['machine_available_time'][machine_id],  # earliest machine available time
-                finish_time  # last operation finish time
-            )
+        # Next operation of this job should start after the current operation finishes
+        if js['left_ops'] > 0:  # If job still has operations
+            for m_id in range(self.machine_dim):
+                js['machine_available_time'][m_id] = max(js['machine_available_time'][m_id], finish_time)
 
-        # Return the new observation vector
-        return self._to_numpy()
+        # Next job on this machine should start after the current job finishes.
+        for job_idx in range(self.job_dim):
+            job_state = job_states[job_idx]
+            if job_state['left_ops'] > 0:
+                if job_state['machine_available_time'][machine_id] < finish_time:
+                    job_state['machine_available_time'][machine_id] = finish_time
+                    self.max_machine_available_time = max(self.max_machine_available_time, finish_time)
+        
+       
+    
+    def schedule_operation_with_idleness(self, job_id: int, machine_id: int, start_time: float, proc_time: float, idleness_duration: float):
+        """Schedule an operation with an additional idleness duration and update state.
+        Args:
+            job_id: ID of the job
+            machine_id: ID of the machine
+            start_time: Original earliest start time for the operation
+            proc_time: Processing time for the operation
+            idleness_duration: Additional time to add to start_time (>=0)
+        """
+        adjusted_start_time = start_time + idleness_duration
+        finish_time = adjusted_start_time + proc_time
+
+        # Use the existing schedule_operation logic with adjusted times
+        self.schedule_operation(job_id, machine_id, adjusted_start_time, finish_time)
+
+
+    def schedule_idle_machine(self, machine_id: int):
+        """Schedule an idle machine for one second.
+        Compute the earliest start time across compatible operations and increment by 1.
+        Only update machine_available_time for jobs with the smallest value.
+        """
+        job_states = self.readable_state['job_states']
+        earliest_start_time = float('inf')
+        min_job_indices = []
+        
+        # Find all jobs with the earliest start time among compatible jobs
+        for job_idx in range(self.job_dim):
+            job_state = job_states[job_idx]
+            # Check if this job has operations compatible with this machine
+            if job_state['left_ops'] > 0:  # Job still has operations to process
+                op_idx = job_state['current_op']
+                # Check if this operation is compatible with this machine
+                if job_state["operations"]["process_time"][op_idx][machine_id] > 0:
+                    current_time = job_state['machine_available_time'][machine_id]
+                    if current_time < earliest_start_time:
+                        earliest_start_time = current_time
+                        min_job_indices = [job_idx] # reset the list when find a new earliest start time
+                    elif current_time == earliest_start_time:
+                        min_job_indices.append(job_idx)
+        
+        # Only update machine_available_time for jobs with the smallest value
+        for job_idx in min_job_indices:
+            job_states[job_idx]['machine_available_time'][machine_id] = earliest_start_time + 1
     
     def is_done(self) -> bool:
         """Check if all jobs are finished. i.e. all left_ops are 0"""
         job_states = self.readable_state['job_states']
         return all(js.get('left_ops', 0) == 0 for js in job_states.values())
+    

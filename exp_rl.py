@@ -8,7 +8,7 @@ from utils.policy_utils import showcase_flat_policy, create_gantt_chart, evaluat
 from config import config
 
 
-def run_flat_rl_experiment(device: str = None):
+def run_flat_rl_experiment():
     """Run flat RL experiment with centralized configuration"""
     
     print("\n" + "="*50)
@@ -16,12 +16,9 @@ def run_flat_rl_experiment(device: str = None):
     print("📋 Single-Agent PPO for Job Shop Scheduling")
     print("="*50)
     
-    # Override device if specified
-    if device is not None:
-        config.common_rl_params['device'] = device
-        print(f"Using device: {device}")
+    # Use device from config (used via trainer params)
     
-    # Get configuration
+    # Get configuration from config
     exp_config = config.get_flat_rl_config()
     simulation_params = exp_config['simulation_params']
     rl_params = exp_config['rl_params']
@@ -39,13 +36,12 @@ def run_flat_rl_experiment(device: str = None):
     print(f"Observation dimension: {env.obs_len}")
     print(f"Action dimension: {env.action_dim}")
     
-    # Create trainer with all parameters
+    # Create trainer with all parameters from config
     trainer = FlatRLTrainer(
         env=env,
         epochs=rl_params['epochs'],
-        steps_per_epoch=rl_params['steps_per_epoch'],
-        train_pi_iters=rl_params['train_pi_iters'],
-        train_v_iters=rl_params['train_v_iters'],
+        episodes_per_epoch=rl_params['episodes_per_epoch'],
+        train_per_episode=rl_params['train_per_episode'],
         pi_lr=rl_params['pi_lr'],
         v_lr=rl_params['v_lr'],
         gamma=rl_params['gamma'],
@@ -58,89 +54,84 @@ def run_flat_rl_experiment(device: str = None):
     )
     
     print(f"Starting training for {rl_params['epochs']} epochs...")
-    try:
-        results = trainer.train()
-        print("Training complete.")
+    results = trainer.train()
+    print("Training complete.")
         
-        # Print training statistics
-        if results['episode_rewards']:
-            recent_rewards = results['episode_rewards'][-10:]
-            print(f"Final average reward: {sum(recent_rewards) / len(recent_rewards):.2f}")
-        if results['episode_makespans']:
-            recent_makespans = results['episode_makespans'][-10:]
-            print(f"Final average makespan: {sum(recent_makespans) / len(recent_makespans):.2f}")
-        if results['episode_twts']:
-            recent_twts = results['episode_twts'][-10:]
-            print(f"Final average TWT: {sum(recent_twts) / len(recent_twts):.2f}")
-        
-        print(f"Model saved in {result_dirs['model']}, wandb logs in {result_dirs['training_process']}.")
-        
-        # Evaluate the trained policy using policy_utils
-        print("\nEvaluating trained policy...")
-        model_path = os.path.join(result_dirs['model'], results['model_filename'])
-        evaluation_result = evaluate_flat_policy(model_path, env, num_episodes=1)
-        
-        # Visualize using policy_utils
-        print("Creating Gantt chart using policy_utils...")
-        gantt_save_path_trainer = os.path.join(result_dirs['training_process'], "gantt_evaluation.png")
-        visualize_policy_schedule(evaluation_result, env, save_path=gantt_save_path_trainer)
-        
-        # Also showcase using flat policy showcase function
-        print("Creating Gantt chart using showcase function...")
-        try:
-            gantt_save_path_showcaser = os.path.join(result_dirs['training_process'], "gantt_showcase.png")
-            model_path = os.path.join(result_dirs['model'], "final_model.pth")
-            showcaser_result = showcase_flat_policy(model_path=model_path, env=env)
-            
-            # Create Gantt chart separately
-            create_gantt_chart(showcaser_result, save_path=gantt_save_path_showcaser, title_suffix="Flat RL")
-            
-            print("\nShowcase Results:")
-            print(f"  Makespan: {showcaser_result['makespan']:.2f}")
-            print(f"  TWT: {showcaser_result['twt']:.2f}")
-            print(f"  Total Reward: {showcaser_result['total_reward']:.2f}")
-            print(f"  Steps Taken: {showcaser_result['steps_taken']}")
-            print(f"  Valid Completion: {showcaser_result['is_valid_completion']}")
-            
-        except Exception as e:
-            print(f"Showcase function failed: {e}")
-            print("Using trainer evaluation result instead.")
-        
-        print(f"\nFlat RL experiment completed successfully!")
-        print(f"Results saved in: {result_dirs['training_process']}")
-        
-        print(f"\n" + "="*50)
-        print("FLAT RL EXPERIMENT SUMMARY")
-        print("="*50)
-        print(f"Training Configuration:")
-        print(f"  Epochs: {rl_params['epochs']}")
-        print(f"  Steps per Epoch: {rl_params['steps_per_epoch']}")
-        print(f"  Policy LR: {rl_params['pi_lr']}")
-        print(f"  Value LR: {rl_params['v_lr']}")
-        print(f"  Gamma: {rl_params['gamma']}")
-        print(f"Final Performance:")
-        print(f"  Makespan: {evaluation_result['makespan']:.2f}")
-        print(f"  TWT: {evaluation_result['twt']:.2f}")
-        print(f"  Total Reward: {evaluation_result['episode_reward']:.2f}")
-        print(f"Training Time: {results['training_time']:.2f}s")
-        
-        return results, evaluation_result
-        
-    except Exception as e:
-        print(f"Training failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, None
+    print(f"Model saved in {result_dirs['model']}, wandb logs in {result_dirs['training_process']}.")
+    
+    # Deterministic evaluation on training environment
+    print("\nEvaluating trained policy (deterministic) on training environment...")
+    model_path = os.path.join(result_dirs['model'], results['model_filename'])
+    evaluation_result = evaluate_flat_policy(model_path, env, num_episodes=1)
+    print(f"Final objective: {evaluation_result.get('objective', 0):.2f}")
+    print(f"Final makespan: {evaluation_result.get('makespan', 0):.2f}")
+    print(f"Final TWT: {evaluation_result.get('twt', 0):.2f}")
+
+    # Save evaluation summary CSV similar to mk06_results_dense.csv
+    import pandas as pd
+    os.makedirs(result_dirs['training_process'], exist_ok=True)
+    reward_label = "Dense" if rl_params['use_reward_shaping'] else "Sparse"
+    run_name_flat = trainer.run_name if hasattr(trainer, 'run_name') and trainer.run_name else 'flat'
+    df = pd.DataFrame([
+        {
+            'method': f"Flat RL ({reward_label})",
+            'objective': evaluation_result.get('objective', 0.0),
+            'makespan': evaluation_result.get('makespan', 0.0),
+            'twt': evaluation_result.get('twt', 0.0),
+            'run_name': run_name_flat
+        }
+    ])
+    csv_path = os.path.join(result_dirs['training_process'], 'flat_results.csv')
+    df.to_csv(csv_path, index=False)
+    print(f"Saved evaluation CSV to {csv_path}")
+    
+    # Visualize using policy_utils
+    print("Creating Gantt chart using policy_utils...")
+    gantt_save_path_trainer = os.path.join(result_dirs['training_process'], "gantt_evaluation.png")
+    visualize_policy_schedule(evaluation_result, env, save_path=gantt_save_path_trainer)
+    
+    # Also showcase using flat policy showcase function
+    print("Creating Gantt chart using showcase function...")
+    gantt_save_path_showcaser = os.path.join(result_dirs['training_process'], "gantt_showcase.png")
+    model_path = os.path.join(result_dirs['model'], "final_model.pth")
+    showcaser_result = showcase_flat_policy(model_path=model_path, env=env)
+    
+    # Create Gantt chart separately
+    create_gantt_chart(showcaser_result, save_path=gantt_save_path_showcaser, title_suffix="Flat RL")
+    
+    print("\nShowcase Results:")
+    print(f"  Makespan: {showcaser_result['makespan']:.2f}")
+    print(f"  TWT: {showcaser_result['twt']:.2f}")
+    print(f"  Total Reward: {showcaser_result['total_reward']:.2f}")
+    print(f"  Steps Taken: {showcaser_result['steps_taken']}")
+    print(f"  Valid Completion: {showcaser_result['is_valid_completion']}")
+    
+    print(f"\nFlat RL experiment completed successfully!")
+    print(f"Results saved in: {result_dirs['training_process']}")
+    
+    print(f"\n" + "="*50)
+    print("FLAT RL EXPERIMENT SUMMARY")
+    print("="*50)
+    print(f"Training Configuration:")
+    print(f"  Epochs: {rl_params['epochs']}")
+    print(f"  Episodes per Epoch: {rl_params['episodes_per_epoch']}")
+    print(f"  Train per Episode: {rl_params['train_per_episode']}")
+    print(f"  Policy LR: {rl_params['pi_lr']}")
+    print(f"  Value LR: {rl_params['v_lr']}")
+    print(f"  Gamma: {rl_params['gamma']}")
+    print(f"  GAE Lambda: {rl_params['gae_lambda']}")
+    print(f"  Clip Ratio: {rl_params['clip_ratio']}")
+    print(f"  Entropy Coef: {rl_params['entropy_coef']}")
+    print(f"  Device: {rl_params['device']}")
+    print(f"  Use Reward Shaping: {rl_params['use_reward_shaping']}")
+    print(f"  Alpha (TWT Weight): {rl_params['alpha']}")
+    
+    return results
 
 
 def main():
     """Main function to run flat RL experiment"""
-    import argparse
-    parser = argparse.ArgumentParser(description="Run flat RL experiment")
-    parser.add_argument('--device', type=str, default=None, help='Device for training (auto, cpu, cuda, etc.)')
-    args = parser.parse_args()
-    
-    run_flat_rl_experiment(device=args.device)
+    run_flat_rl_experiment()
 
 
 if __name__ == "__main__":

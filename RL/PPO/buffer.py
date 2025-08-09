@@ -106,3 +106,41 @@ class HierarchicalPPOBuffer:
         self.manager_dones.zero_()
         self.pooled_goals.zero_()
         self.manager_observations.zero_()
+
+
+class HybridPPOBuffer(PPOBuffer):
+    """
+    Buffer for storing PPO training data with hybrid action space (discrete + continuous).
+    Inherits from PPOBuffer and adds fields for continuous actions and their log probs.
+    """
+    def __init__(self, buffer_size: int, obs_shape: Tuple[int], discrete_action_dim: int, 
+                 continuous_action_dim: int, device: torch.device):
+        super().__init__(buffer_size, obs_shape, discrete_action_dim, device) # Call parent constructor
+        self.continuous_actions = torch.zeros((buffer_size, continuous_action_dim), dtype=torch.float32, device=device)
+        self.continuous_log_probs = torch.zeros(buffer_size, dtype=torch.float32, device=device)
+
+    def add(self, obs: torch.Tensor, discrete_action: int, continuous_action: float, reward: float, value: float, 
+            discrete_log_prob: float, continuous_log_prob: float, action_mask: torch.Tensor, done: bool):
+        # Store current ptr before parent increments it
+        current_ptr = self.ptr
+        
+        # Call parent's add method for common fields
+        super().add(obs, discrete_action, reward, value, discrete_log_prob, action_mask, done)
+        
+        # Add hybrid-specific fields using the original ptr position
+        self.continuous_actions[current_ptr] = continuous_action
+        self.continuous_log_probs[current_ptr] = continuous_log_prob
+
+    def get_batch(self) -> Dict[str, torch.Tensor]:
+        # Get batch from parent class
+        batch = super().get_batch()
+        
+        # Add hybrid-specific fields
+        batch['continuous_actions'] = self.continuous_actions[:self.size]
+        batch['continuous_log_probs'] = self.continuous_log_probs[:self.size]
+        return batch
+    
+    def clear(self):
+        super().clear()
+        self.continuous_actions.zero_()
+        self.continuous_log_probs.zero_()

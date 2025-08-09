@@ -32,12 +32,10 @@ def showcase_flat_policy(model_path: str, env: RLEnv) -> Dict:
     obs, _ = env.reset()
     obs = torch.tensor(obs, dtype=torch.float32)
     
-    # Initialize schedule tracking
-    machine_schedule = {m: [] for m in range(env.num_machines)}
-    operation_schedules = []
-    
     episode_reward = 0
     step_count = 0
+    final_info = None
+    final_machine_schedule = None
     
     while True:
         action_mask = env.get_action_mask()
@@ -46,51 +44,31 @@ def showcase_flat_policy(model_path: str, env: RLEnv) -> Dict:
         
         action = agent.get_deterministic_action(obs, action_mask)
         
-        # Decode action for logging before environment step
-        job_id, machine_id = env.decode_action(action)
-        op_idx = env.state.readable_state['job_states'][job_id]['current_op']
-        operation_id = sum(len(env.jobs[j].operations) for j in range(job_id)) + op_idx
-        
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
-        
-        # Log schedule info after environment step
-        updated_job_state = env.state.readable_state['job_states'][job_id]
-        start_time = updated_job_state['operations']['operation_start_time'][op_idx][machine_id]
-        finish_time = updated_job_state['operations']['finish_time'][op_idx]
-        
-        machine_schedule[machine_id].append((operation_id, start_time))
-        operation_schedules.append({
-            'operation_id': operation_id, 'job_id': job_id, 'op_idx': op_idx, 'machine_id': machine_id,
-            'start_time': start_time, 'finish_time': finish_time,
-            'processing_time': env.jobs[job_id].operations[op_idx].get_processing_time(machine_id)
-        })
         
         episode_reward += reward
         obs = torch.tensor(next_obs, dtype=torch.float32)
         step_count += 1
         
+        # Store the final info and machine_schedule
+        final_info = info.get('objective_info', {})
+        final_machine_schedule = info.get('machine_schedule', {})
+        
         if done:
             break
     
-    # Sort machine schedules by start time
-    for m in machine_schedule:
-        machine_schedule[m].sort(key=lambda x: x[1])
-            
-    final_info = env.get_current_objective()
-    
     # Create comprehensive schedule_info including machine_schedule
     schedule_info = {
-        'makespan': final_info['makespan'],
-        'twt': final_info['twt'],
-        'objective': final_info['objective'],
-        'machine_schedule': machine_schedule,
-        'operation_schedules': operation_schedules
+        'makespan': final_info.get('makespan', 0),
+        'twt': final_info.get('twt', 0),
+        'objective': final_info.get('objective', 0),
+        'machine_schedule': final_machine_schedule
     }
     
     return {
-        'makespan': final_info['makespan'],
-        'twt': final_info['twt'],
+        'makespan': final_info.get('makespan', 0),
+        'twt': final_info.get('twt', 0),
         'total_reward': episode_reward,
         'steps_taken': step_count,
         'is_valid_completion': env.state.is_done(),
@@ -99,8 +77,16 @@ def showcase_flat_policy(model_path: str, env: RLEnv) -> Dict:
     }
 
 def showcase_hierarchical_policy(model_path: str, env: RLEnv) -> Dict:
-    """Load a trained hierarchical agent and run it for one episode."""
+    """
+    Showcase a trained hierarchical agent by running deterministic policy and collecting schedule information.
     
+    Args:
+        model_path: Path to the saved model or directory containing model
+        env: Environment to showcase on
+        
+    Returns:
+        Dictionary containing showcase results
+    """
     # If model_path is a directory, find the most recent model file
     if os.path.isdir(model_path):
         model_files = [f for f in os.listdir(model_path) if f.endswith('.pth')]
@@ -110,17 +96,20 @@ def showcase_hierarchical_policy(model_path: str, env: RLEnv) -> Dict:
         model_files.sort(reverse=True)  # Sort by name (timestamp-based names)
         model_path = os.path.join(model_path, model_files[0])
     
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model not found at {model_path}")
-
+    # Load agent configuration and model
     config = HierarchicalAgent.get_saved_config(model_path)
+    
+    # Calculate goal_duration dynamically based on environment
+    total_operations = env.num_jobs * max(len(job.operations) for job in env.jobs.values())
+    goal_duration_ratio = config.get('goal_duration_ratio', 12)  # Default ratio if not in config
+    goal_duration = max(1, total_operations // goal_duration_ratio)
     
     agent = HierarchicalAgent(
         input_dim=config['input_dim'],
         action_dim=config['action_dim'],
         latent_dim=config['latent_dim'],
         goal_dim=config['goal_dim'],
-        goal_duration=config.get('goal_duration', 10),
+        goal_duration=goal_duration,  # Use calculated goal_duration
         manager_lr=config['manager_lr'],
         worker_lr=config['worker_lr'],
         gamma_manager=config['gamma_manager'],
@@ -132,31 +121,40 @@ def showcase_hierarchical_policy(model_path: str, env: RLEnv) -> Dict:
     )
     agent.load(model_path)
     
-    print(f"\nEvaluating hierarchical policy from {model_path}...")
+    print(f"\nShowcasing hierarchical policy from {model_path}...")
+    print(f"Environment: {env.num_jobs} jobs, {env.num_machines} machines")
+    print(f"Total operations: {total_operations}, Goal duration ratio: {goal_duration_ratio}")
+    print(f"Calculated goal duration: {goal_duration}")
     
     obs, _ = env.reset()
     obs = torch.tensor(obs, dtype=torch.float32, device=agent.device)
-    
-    # Initialize schedule tracking
-    machine_schedule = {m: [] for m in range(env.num_machines)}
-    operation_schedules = []
     
     goals_history = []
     episode_reward = 0
     step = 0
     manager_decisions = 0
     max_steps = env.num_jobs * max(len(job.operations) for job in env.jobs.values()) * 2
+    final_info = None
+    final_machine_schedule = None
     
     while not env.state.is_done() and step < max_steps:
         z_t = agent.encode_state(obs)
         
-        if step % agent.goal_duration == 0:
-            goal = agent.get_manager_goal(z_t, deterministic=True)
+        if step % goal_duration == 0:  # Use calculated goal_duration
+            goal = agent.get_manager_goal(z_t)
             if goal is not None:
                 goals_history.append(goal)
             manager_decisions += 1
         
-        pooled_goal = agent.pool_goals(goals_history, step, agent.goal_duration)
+        # Use the last goal and current goal for pooling
+        last_goal = goals_history[-2] if len(goals_history) > 1 else None
+        current_goal = goals_history[-1] if goals_history else None
+        
+        if current_goal is not None:
+            pooled_goal = agent.pool_goals(last_goal, current_goal, step, goal_duration)  # Use calculated goal_duration
+        else:
+            # If no goals available, create a zero tensor as fallback
+            pooled_goal = torch.zeros(agent.latent_dim, device=agent.device)
         
         action_mask = env.get_action_mask()
         if not action_mask.any():
@@ -164,52 +162,32 @@ def showcase_hierarchical_policy(model_path: str, env: RLEnv) -> Dict:
         
         action = agent.get_deterministic_action(obs, action_mask, pooled_goal)
         
-        # Decode action for logging before environment step
-        job_id, machine_id = env.decode_action(action)
-        op_idx = env.state.readable_state['job_states'][job_id]['current_op']
-        operation_id = sum(len(env.jobs[j].operations) for j in range(job_id)) + op_idx
-        
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
-        
-        # Log schedule info after environment step
-        updated_job_state = env.state.readable_state['job_states'][job_id]
-        start_time = updated_job_state['operations']['operation_start_time'][op_idx][machine_id]
-        finish_time = updated_job_state['operations']['finish_time'][op_idx]
-        
-        machine_schedule[machine_id].append((operation_id, start_time))
-        operation_schedules.append({
-            'operation_id': operation_id, 'job_id': job_id, 'op_idx': op_idx, 'machine_id': machine_id,
-            'start_time': start_time, 'finish_time': finish_time,
-            'processing_time': env.jobs[job_id].operations[op_idx].get_processing_time(machine_id)
-        })
         
         episode_reward += reward
         next_obs = torch.tensor(next_obs, dtype=torch.float32, device=agent.device)
         obs = next_obs
         step += 1
         
+        # Store the final info and machine_schedule
+        final_info = info.get('objective_info', {})
+        final_machine_schedule = info.get('machine_schedule', {})
+        
         if done:
             break
 
-    # Sort machine schedules by start time
-    for m in machine_schedule:
-        machine_schedule[m].sort(key=lambda x: x[1])
-
-    final_info = env.get_current_objective()
-    
     # Create comprehensive schedule_info including machine_schedule
     schedule_info = {
-        'makespan': final_info['makespan'],
-        'twt': final_info['twt'],
-        'objective': final_info['objective'],
-        'machine_schedule': machine_schedule,
-        'operation_schedules': operation_schedules
+        'makespan': final_info.get('makespan', 0),
+        'twt': final_info.get('twt', 0),
+        'objective': final_info.get('objective', 0),
+        'machine_schedule': final_machine_schedule
     }
     
     return {
-        'makespan': final_info['makespan'],
-        'twt': final_info['twt'],
+        'makespan': final_info.get('makespan', 0),
+        'twt': final_info.get('twt', 0),
         'total_reward': episode_reward,
         'steps_taken': step,
         'manager_decisions': manager_decisions,
@@ -234,42 +212,20 @@ def create_gantt_chart(evaluation_result: Dict, save_path: str, title_suffix: st
         print("Warning: `machine_schedule` not found in `schedule_info`. Gantt chart cannot be created.")
         return
 
-    try:
-        from utils.solution_utils import SolutionUtils
-        solution_utils = SolutionUtils(data_handler, machine_schedule)
-        fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
+    from utils.solution_utils import SolutionUtils
+    solution_utils = SolutionUtils(data_handler, machine_schedule)
+    fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
 
-        if fig:
-            if title_suffix:
-                fig.update_layout(title=f"Gantt Chart - {title_suffix}")
-            fig.write_image(save_path)
-            print(f"Gantt chart saved to {save_path}")
-        else:
-            print("Gantt chart could not be created.")
-    except ImportError:
-        print("Warning: SolutionUtils could not be imported. Using basic Gantt chart.")
-        fig = go.Figure()
-        for machine_id, tasks in machine_schedule.items():
-            for task in tasks:
-                op_id, start_time = task
-                # Estimate processing time for basic chart (this is a simplified fallback)
-                processing_time = 10  # Default processing time
-                finish_time = start_time + processing_time
-                fig.add_trace(go.Bar(
-                    x=[processing_time],
-                    y=[f"Machine {machine_id}"],
-                    base=[start_time],
-                    name=f"Op {op_id}",
-                    orientation='h'
-                ))
+    if fig:
         if title_suffix:
             fig.update_layout(title=f"Gantt Chart - {title_suffix}")
-        fig.show()
-        if save_path:
-            fig.write_image(save_path)
-            print(f"Gantt chart saved to {save_path}")
-    except Exception as e:
-        print(f"Error creating Gantt chart: {e}")
+        # Save directly to HTML (no try/except)
+        alt_path = os.path.splitext(save_path)[0] + ".html" if save_path else None
+        if alt_path:
+            fig.write_html(alt_path, include_plotlyjs="cdn")
+            print(f"Gantt chart saved to {alt_path}")
+    else:
+        print("Gantt chart could not be created.")
 
 
 def evaluate_flat_policy(model_path: str, env: RLEnv, num_episodes: int = 1) -> Dict:
@@ -300,7 +256,7 @@ def evaluate_flat_policy(model_path: str, env: RLEnv, num_episodes: int = 1) -> 
     )
     
     agent.load(model_path)
-    
+        
     print(f"\nEvaluating flat policy from {model_path} for {num_episodes} episodes...")
     
     all_episode_results = []
@@ -310,13 +266,11 @@ def evaluate_flat_policy(model_path: str, env: RLEnv, num_episodes: int = 1) -> 
         obs, _ = env.reset()
         obs = torch.tensor(obs, dtype=torch.float32, device=agent.device)
         
-        # Track schedule information
-        machine_schedule = {machine_id: [] for machine_id in range(env.num_machines)}
-        operation_schedules = []
-        
         episode_reward = 0
         step_count = 0
         max_steps = env.num_jobs * max(len(job.operations) for job in env.jobs.values()) * 2  # Safety limit
+        final_info = None
+        final_machine_schedule = None
         
         while not env.state.is_done() and step_count < max_steps:
             # Get valid actions
@@ -329,64 +283,27 @@ def evaluate_flat_policy(model_path: str, env: RLEnv, num_episodes: int = 1) -> 
             # Take deterministic action
             action = agent.get_deterministic_action(obs, action_mask)
             
-            # Decode action to get job and machine
-            job_id, machine_id = env.decode_action(action)
-            
-            # Get operation info before step
-            job_states = env.state.readable_state['job_states']
-            op_idx = job_states[job_id]['current_op']
-            
-            # Check if this is a valid operation
-            if op_idx >= len(env.jobs[job_id].operations):
-                print(f"Warning: Invalid operation index {op_idx} for job {job_id}")
-                break
-            
             # Step environment
             next_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-            
-            # Calculate operation_id (assuming sequential numbering)
-            operation_id = sum(len(env.jobs[j].operations) for j in range(job_id)) + op_idx
-            
-            # Get the start time that was used (from the updated state)
-            updated_job_state = env.state.readable_state['job_states'][job_id]
-            start_time = updated_job_state['operations']['operation_start_time'][op_idx][machine_id]
-            
-            # Add to machine schedule
-            machine_schedule[machine_id].append((operation_id, start_time))
-            
-            # Add to operation schedules for detailed tracking
-            operation_schedules.append({
-                'operation_id': operation_id,
-                'job_id': job_id,
-                'operation_index': op_idx,
-                'machine_id': machine_id,
-                'start_time': start_time,
-                'finish_time': updated_job_state['operations']['finish_time'][op_idx],
-                'processing_time': env.jobs[job_id].operations[op_idx].get_processing_time(machine_id)
-            })
             
             episode_reward += reward
             obs = torch.tensor(next_obs, dtype=torch.float32, device=agent.device)
             step_count += 1
             
+            # Store the final info and machine_schedule
+            final_info = info.get('objective_info', {})
+            final_machine_schedule = info.get('machine_schedule', {})
+            
             if done:
                 break
         
-        # Get final objective values
-        final_info = env.get_current_objective()
-        
-        # Sort machine schedules by start time for better visualization
-        for machine_id in machine_schedule:
-            machine_schedule[machine_id].sort(key=lambda x: x[1])  # Sort by start_time
-        
         episode_result = {
-            'machine_schedule': machine_schedule,
-            'operation_schedules': operation_schedules,
+            'machine_schedule': final_machine_schedule,
             'episode_reward': episode_reward,
-            'makespan': final_info['makespan'],
-            'twt': final_info['twt'],
-            'objective': final_info['objective'],
+            'makespan': final_info.get('makespan', 0),
+            'twt': final_info.get('twt', 0),
+            'objective': final_info.get('objective', 0),
             'steps_taken': step_count,
             'is_valid_completion': env.state.is_done()
         }
@@ -442,12 +359,17 @@ def evaluate_hierarchical_policy(model_path: str, env: RLEnv, num_episodes: int 
     # Load agent configuration and model
     config = HierarchicalAgent.get_saved_config(model_path)
     
+    # Calculate goal_duration dynamically based on environment
+    total_operations = env.num_jobs * max(len(job.operations) for job in env.jobs.values())
+    goal_duration_ratio = config.get('goal_duration_ratio', 12)  # Default ratio if not in config
+    goal_duration = max(1, total_operations // goal_duration_ratio)
+    
     agent = HierarchicalAgent(
         input_dim=config['input_dim'],
         action_dim=config['action_dim'],
         latent_dim=config['latent_dim'],
         goal_dim=config['goal_dim'],
-        goal_duration=config.get('goal_duration', 10),
+        goal_duration=goal_duration,  # Use calculated goal_duration
         manager_lr=config['manager_lr'],
         worker_lr=config['worker_lr'],
         gamma_manager=config['gamma_manager'],
@@ -460,6 +382,9 @@ def evaluate_hierarchical_policy(model_path: str, env: RLEnv, num_episodes: int 
     agent.load(model_path)
     
     print(f"\nEvaluating hierarchical policy from {model_path} for {num_episodes} episodes...")
+    print(f"Environment: {env.num_jobs} jobs, {env.num_machines} machines")
+    print(f"Total operations: {total_operations}, Goal duration ratio: {goal_duration_ratio}")
+    print(f"Calculated goal duration: {goal_duration}")
     
     all_episode_results = []
 
@@ -467,26 +392,32 @@ def evaluate_hierarchical_policy(model_path: str, env: RLEnv, num_episodes: int 
         obs, _ = env.reset()
         obs = torch.tensor(obs, dtype=torch.float32, device=agent.device)
         
-        # Initialize schedule tracking
-        machine_schedule = {m: [] for m in range(env.num_machines)}
-        operation_schedules = []
-        
         goals_history = []
         episode_reward = 0
         step = 0
         manager_decisions = 0
         max_steps = env.num_jobs * max(len(job.operations) for job in env.jobs.values()) * 2
+        final_info = None
+        final_machine_schedule = None
 
         while not env.state.is_done() and step < max_steps:
             z_t = agent.encode_state(obs)
             
-            if step % agent.goal_duration == 0:
-                goal = agent.get_manager_goal(z_t, deterministic=True)
+            if step % goal_duration == 0:  # Use calculated goal_duration
+                goal = agent.get_manager_goal(z_t)
                 if goal is not None:
                     goals_history.append(goal)
                 manager_decisions += 1
             
-            pooled_goal = agent.pool_goals(goals_history, step, agent.goal_duration)
+            # Use the last goal and current goal for pooling
+            last_goal = goals_history[-2] if len(goals_history) > 1 else None
+            current_goal = goals_history[-1] if goals_history else None
+            
+            if current_goal is not None:
+                pooled_goal = agent.pool_goals(last_goal, current_goal, step, goal_duration)  # Use calculated goal_duration
+            else:
+                # If no goals available, create a zero tensor as fallback
+                pooled_goal = torch.zeros(agent.latent_dim, device=agent.device)
             
             action_mask = env.get_action_mask()
             if not action_mask.any():
@@ -494,56 +425,42 @@ def evaluate_hierarchical_policy(model_path: str, env: RLEnv, num_episodes: int 
             
             action = agent.get_deterministic_action(obs, action_mask, pooled_goal)
             
-            # Decode action for logging
-            job_id, machine_id = env.decode_action(action)
-            op_idx = env.state.readable_state['job_states'][job_id]['current_op']
-            operation_id = sum(len(env.jobs[j].operations) for j in range(job_id)) + op_idx
-
             # Step environment
             next_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-            
-            # Log schedule info
-            updated_job_state = env.state.readable_state['job_states'][job_id]
-            start_time = updated_job_state['operations']['operation_start_time'][op_idx][machine_id]
-            finish_time = updated_job_state['operations']['finish_time'][op_idx]
-            
-            machine_schedule[machine_id].append((operation_id, start_time, finish_time))
-            operation_schedules.append({
-                'operation_id': operation_id, 'job_id': job_id, 'op_idx': op_idx, 'machine_id': machine_id,
-                'start_time': start_time, 'finish_time': finish_time,
-                'processing_time': env.jobs[job_id].operations[op_idx].get_processing_time(machine_id)
-            })
 
             episode_reward += reward
             obs = torch.tensor(next_obs, dtype=torch.float32, device=agent.device)
             step += 1
             
+            # Store the final info and machine_schedule
+            final_info = info.get('objective_info', {})
+            final_machine_schedule = info.get('machine_schedule', {})
+            
             if done:
                 break
-
-        # Sort machine schedules by start time
-        for m in machine_schedule:
-            machine_schedule[m].sort(key=lambda x: x[1])
-
-        final_info = env.get_current_objective()
+        
         episode_result = {
-            'machine_schedule': machine_schedule, 'operation_schedules': operation_schedules,
-            'episode_reward': episode_reward, 'makespan': final_info['makespan'], 'twt': final_info['twt'],
-            'objective': final_info['objective'], 'steps_taken': step, 'manager_decisions': manager_decisions,
+            'machine_schedule': final_machine_schedule,
+            'episode_reward': episode_reward,
+            'makespan': final_info.get('makespan', 0),
+            'twt': final_info.get('twt', 0),
+            'objective': final_info.get('objective', 0),
+            'steps_taken': step,
+            'manager_decisions': manager_decisions,
             'is_valid_completion': env.state.is_done()
         }
         
         all_episode_results.append(episode_result)
-
+    
     if num_episodes > 1:
         # Aggregate results
-        rewards = [res['episode_reward'] for res in all_episode_results]
-        makespans = [res['makespan'] for res in all_episode_results]
-        twts = [res['twt'] for res in all_episode_results]
-        objectives = [res['objective'] for res in all_episode_results]
-
-        avg_results = {
+        rewards = [r['episode_reward'] for r in all_episode_results]
+        makespans = [r['makespan'] for r in all_episode_results]
+        twts = [r['twt'] for r in all_episode_results]
+        objectives = [r['objective'] for r in all_episode_results]
+        
+        return {
             'avg_reward': np.mean(rewards),
             'std_reward': np.std(rewards),
             'avg_makespan': np.mean(makespans),
@@ -552,13 +469,21 @@ def evaluate_hierarchical_policy(model_path: str, env: RLEnv, num_episodes: int 
             'std_twt': np.std(twts),
             'avg_objective': np.mean(objectives),
             'std_objective': np.std(objectives),
+            'num_episodes': num_episodes,
+            'individual_results': all_episode_results
         }
-        # Return the first episode's detailed schedule for visualization plus aggregates
-        final_result = {**avg_results, **all_episode_results[0]}
-        return final_result
     else:
-        # Single episode - just return the result
-        return all_episode_results[0]
+        # Single episode result
+        result = all_episode_results[0]
+        return {
+            'episode_reward': result['episode_reward'],
+            'makespan': result['makespan'],
+            'twt': result['twt'],
+            'objective': result['objective'],
+            'steps_taken': result['steps_taken'],
+            'manager_decisions': result['manager_decisions'],
+            'is_valid_completion': result['is_valid_completion']
+        }
 
 
 def visualize_policy_schedule(evaluation_result: Dict, env: RLEnv, save_path: Optional[str] = None):
@@ -570,40 +495,29 @@ def visualize_policy_schedule(evaluation_result: Dict, env: RLEnv, save_path: Op
         env: Environment instance (for data_handler access)
         save_path: Optional path to save the Gantt chart image
     """
-    try:
-        from utils.solution_utils import SolutionUtils
-        
-        machine_schedule = evaluation_result['machine_schedule']
-        data_handler = env.data_handler
-        
-        # Create SolutionUtils instance
-        solution_utils = SolutionUtils(data_handler, machine_schedule)
-        
-        # Validate the solution
-        validation_result = solution_utils.validate_solution()
-        print(f"Solution validation: {'VALID' if validation_result['is_valid'] else 'INVALID'}")
-        if not validation_result['is_valid']:
-            print("Validation violations:")
-            for violation in validation_result['violations']:
-                print(f"  - {violation}")
-        
-        # Draw Gantt chart
-        fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
-        
-        if save_path and fig is not None:
-            try:
-                fig.write_image(save_path)
-                print(f"Gantt chart saved to {save_path}")
-            except Exception as e:
-                print(f"Could not save Gantt chart: {e}")
-                print("Note: You may need to install kaleido: pip install kaleido")
-        
-        return fig
-        
-    except ImportError as e:
-        print(f"Could not import SolutionUtils: {e}")
-        print("Make sure the utils module is in your Python path")
-        return None
-    except Exception as e:
-        print(f"Error creating visualization: {e}")
-        return None
+    from utils.solution_utils import SolutionUtils
+    
+    machine_schedule = evaluation_result['machine_schedule']
+    data_handler = env.data_handler
+    
+    # Create SolutionUtils instance
+    solution_utils = SolutionUtils(data_handler, machine_schedule)
+    
+    # Validate the solution
+    validation_result = solution_utils.validate_solution()
+    print(f"Solution validation: {'VALID' if validation_result['is_valid'] else 'INVALID'}")
+    if not validation_result['is_valid']:
+        print("Validation violations:")
+        for violation in validation_result['violations']:
+            print(f"  - {violation}")
+    
+    # Draw Gantt chart
+    fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
+    
+    if save_path and fig is not None:
+        # Save directly to HTML (no try/except)
+        alt_path = os.path.splitext(save_path)[0] + ".html"
+        fig.write_html(alt_path, include_plotlyjs="cdn")
+        print(f"Gantt chart saved to {alt_path}")
+    
+    return fig

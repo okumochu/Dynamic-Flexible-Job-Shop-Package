@@ -1,29 +1,28 @@
 """
-RLEnv: Unified Event-driven Flexible Job Shop Scheduling Environment
+RLEnv: Vanilla Event-driven Flexible Job Shop Scheduling Environment
 Implements OpenAI Gym API for multi-objective optimization (Makespan + TWT)
-Compatible with both flat and hierarchical RL algorithms
+Pure job scheduling environment without idle actions
 """
 
 import torch
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional, Any, List
 import gymnasium as gym
 from gymnasium import spaces
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 from RL.state import State
 
 class RLEnv(gym.Env):
     """
-    Unified Event-driven Flexible Job Shop Scheduling Environment.
+    Vanilla Event-driven Flexible Job Shop Scheduling Environment.
     
     The environment simulates a flexible job shop where:
     - Each job has multiple operations that must be processed in order
     - Each operation can be processed on multiple compatible machines
-    - The agent dispatches operations to machines
+    - The agent dispatches operations to machines (no idle actions)
     - Time advances to the next completion event after each dispatch
     - Objectives: minimize makespan and total weighted tardiness
     
-    Compatible with both flat and hierarchical RL algorithms.
+    This is a pure job scheduling environment without idle actions.
     """
     
     def __init__(self, data_handler, alpha: float, use_reward_shaping: bool = True, max_jobs: Optional[int] = None, 
@@ -53,21 +52,30 @@ class RLEnv(gym.Env):
         self.use_reward_shaping = use_reward_shaping
         self.max_jobs = self.state.job_dim
         self.max_machines = self.state.machine_dim
-        self.action_dim = self.state.action_dim
+        
+        # Override action dimension to exclude idle actions (only job scheduling)
+        self.action_dim = self.state.job_dim * self.state.machine_dim
         
         # Initialize state and get obs_len
         self.state.reset()
         self.obs_len = len(self.state._to_numpy())
         
         self.action_space = spaces.Discrete(self.action_dim)
-        self.observation_space = spaces.Box(low=0, high=1, shape=(self.obs_len,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_len,), dtype=np.float32)
         self.last_step_objective = 0
         self.last_episode_objective = 0
+        
+        # Initialize machine_schedule for tracking
+        self.machine_schedule = {machine_id: [] for machine_id in range(self.num_machines)}
         
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         """Reset the environment to initial state."""
         self.state.reset()
         self.last_step_objective = 0
+        
+        # Reset machine_schedule
+        self.machine_schedule = {machine_id: [] for machine_id in range(self.num_machines)}
+        
         obs = self.state._to_numpy()
         return obs, {}
     
@@ -76,7 +84,7 @@ class RLEnv(gym.Env):
         Take a step in the environment.
         
         Args:
-            action: Action index (dispatch operations)
+            action: Action index (dispatch operations only)
             
         Returns:
             observation: Current observation tensor
@@ -87,23 +95,29 @@ class RLEnv(gym.Env):
         """
         terminated = False
         objective_info = {}
+        info = {}
 
-        # Decode Action
+        # Decode Action - only job scheduling actions
         job_id, machine_id = self.decode_action(action)
+        
+        # Schedule a job to a machine
         job_states = self.state.readable_state['job_states']
-        op_idx = job_states[job_id]['current_op']
+        current_job_state = job_states[job_id]
+        op_idx = current_job_state['current_op']
         op = self.jobs[job_id].operations[op_idx]
         
-        # Calculate correct start time based on constraints
-        job_state = job_states[job_id]
-        machine_available_time = job_state['machine_available_time'][machine_id]
-        prev_op_finish_time = job_state['operations']['finish_time'][op_idx - 1] if op_idx > 0 else 0
-        
-        start_time = max(machine_available_time, prev_op_finish_time)
+        # Get start time from machine_available_time which already accounts for both
+        # machine availability and job precedence constraints
+        start_time = current_job_state['machine_available_time'][machine_id]
         
         proc_time = op.get_processing_time(machine_id)
         finish_time = start_time + proc_time
         self.state.schedule_operation(job_id, machine_id, start_time, finish_time)
+        
+        # Get operation_id and add to machine_schedule
+        operation_id = op.operation_id
+        self.machine_schedule[machine_id].append((operation_id, start_time))
+        
         objective_info = self.get_current_objective()
 
         # Calculate dense reward
@@ -117,32 +131,40 @@ class RLEnv(gym.Env):
             self.last_episode_objective = objective_info['objective'] # update for sparse reward
             terminated = True
 
-        return obs, reward, terminated, False, objective_info
+        # Store scheduling information in info
+        info['objective_info'] = objective_info
+        info['machine_schedule'] = self.machine_schedule
+        return obs, reward, terminated, False, info
     
     def get_action_mask(self) -> torch.Tensor:
-        """Get boolean mask for valid actions."""
+        """Get boolean mask for valid actions (only job scheduling actions)."""
         mask = torch.zeros(self.action_dim, dtype=torch.bool)
         
         job_states = self.state.readable_state['job_states']
-        for job_id in range(self.num_jobs):
+        
+        # Handle job scheduling actions (actions 0 to job_dim * machine_dim - 1)
+        for job_id in range(self.state.job_dim):
             job_state = job_states[job_id]
             op_idx = job_state['current_op']
             
-            if op_idx >= len(self.jobs[job_id].operations):
-                continue  # No more ops
+            # Skip if job is done (no more operations) or if it's a padding job
+            if job_state['left_ops'] <= 0:
+                continue
             
-            op = self.jobs[job_id].operations[op_idx]
-            for machine_id in op.compatible_machines:
-                idx = job_id * self.num_machines + machine_id
-                # Always allow scheduling: agent can always schedule on any compatible machine
-                mask[idx] = True
+            # Only allow scheduling the current operation (next operation in sequence)
+            # This ensures job precedence constraints are enforced
+            for machine_id in range(self.state.machine_dim):
+                # Check if this operation is compatible with this machine
+                if job_state["operations"]["process_time"][op_idx][machine_id] > 0:
+                    idx = job_id * self.state.machine_dim + machine_id
+                    mask[idx] = True
         
         return mask
     
     def decode_action(self, action: int) -> Tuple[int, int]:
-        """Decode action index to (job_id, machine_id)."""
-        job_id = action // self.num_machines
-        machine_id = action % self.num_machines
+        """Decode action index to (job_id, machine_id) for job scheduling only."""
+        job_id = action // self.state.machine_dim
+        machine_id = action % self.state.machine_dim
         return job_id, machine_id
 
     def get_current_objective(self) -> Dict[str, Any]:

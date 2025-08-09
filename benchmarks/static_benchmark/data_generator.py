@@ -16,7 +16,7 @@ class DataGenerator:
     """
     
     @staticmethod
-    def load_from_dataset(dataset_path: str, TF: float = 0.3, RDD: float = 0.6, seed: Optional[int] = None) -> Tuple[List[Job], List[Operation], int, int, int]:
+    def load_from_dataset(dataset_path: str, TF: float, RDD: float, seed: Optional[int] = None) -> Tuple[List[Job], List[Operation], int, int, int]:
         """
         Load data from an existing dataset file and generate due dates/weights.
         
@@ -167,10 +167,10 @@ class DataGenerator:
         processing_time_lb: int,
         processing_time_ub: int,
         compatible_machines_lb: int,
+        TF: float,
+        RDD: float,
         compatible_machines_ub: Optional[int] = None,
-        seed: Optional[int] = None,
-        TF: float = 0.4,
-        RDD: float = 0.8
+        seed: Optional[int] = None
     ) -> Tuple[List[Job], List[Operation], int, int, int]:
         """
         Generate synthetic FJSP data with specified parameters.

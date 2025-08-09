@@ -20,16 +20,22 @@ class FlexibleJobShopDataHandler:
     - Other optimization methods
     """
     
-    def __init__(self, data_source: Union[str, Dict], data_type: str = "dataset"):
+    def __init__(self, data_source: Union[str, Dict], data_type: str = "dataset", TF: float = 0.4, RDD: float = 0.8, seed: Optional[int] = None):
         """
         Initialize the data handler.
         
         Args:
             data_source: Either a dataset path (str) or simulation parameters (Dict)
             data_type: Either "dataset" or "simulation"
+            TF: Tardiness Factor for due date generation (default: 0.4)
+            RDD: Relative Range of Due Dates (default: 0.8)
+            seed: Random seed for reproducibility (default: None)
         """
         self.data_source = data_source
         self.data_type = data_type
+        self.TF = TF
+        self.RDD = RDD
+        self.seed = seed
         self.jobs: Dict[int, Job] = {}
         self.operations: List[Operation] = []
         self.num_jobs: int = 0
@@ -47,7 +53,7 @@ class FlexibleJobShopDataHandler:
         if self.data_type == "dataset":
             if isinstance(self.data_source, str):
                 jobs, self.operations, self.num_jobs, self.num_machines, self.num_operations = \
-                    DataGenerator.load_from_dataset(self.data_source)
+                    DataGenerator.load_from_dataset(self.data_source, self.TF, self.RDD, self.seed)
                 self.jobs = {job.job_id: job for job in jobs}
             else:
                 raise ValueError("For dataset type, data_source must be a string (file path)")
@@ -186,6 +192,10 @@ class FlexibleJobShopDataHandler:
             sum_op_processing_time = sum(op.machine_processing_times.values())
             total_processing_time += sum_op_processing_time / len(op.machine_processing_times)
         return total_processing_time / self.num_operations
+    
+    def get_max_processing_time(self) -> int:
+        """Get max processing time for all operations across all compatible machines"""
+        return max(self.get_processing_time(op.operation_id, machine_id) for op in self.operations for machine_id in op.compatible_machines)
 
     def get_max_weight(self) -> int:
         """Get max weight for all jobs."""

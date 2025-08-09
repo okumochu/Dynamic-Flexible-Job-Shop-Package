@@ -48,9 +48,8 @@ def train_flat_rl(training_rl_env: RLEnv, test_environments: List[FlexibleJobSho
     flat_trainer = FlatRLTrainer(
         env=training_rl_env,
         epochs=config_params['rl_params']['epochs'],
-        steps_per_epoch=config_params['rl_params']['steps_per_epoch'],
-        train_pi_iters=config_params['rl_params']['train_pi_iters'],
-        train_v_iters=config_params['rl_params']['train_v_iters'],
+        episodes_per_epoch=config_params['rl_params']['episodes_per_epoch'],
+        train_per_episode=config_params['rl_params']['train_per_episode'],
         pi_lr=config_params['rl_params']['pi_lr'],
         v_lr=config_params['rl_params']['v_lr'],
         gamma=config_params['rl_params']['gamma'],
@@ -86,8 +85,8 @@ def train_hierarchical_rl(training_rl_env: RLEnv, test_environments: List[Flexib
     hierarchical_trainer = HierarchicalRLTrainer(
         env=training_rl_env,
         epochs=config_params['rl_params']['epochs'],
-        steps_per_epoch=config_params['rl_params']['steps_per_epoch'],
-        goal_duration=config_params['rl_params']['goal_duration'],
+        episodes_per_epoch=config_params['rl_params']['episodes_per_epoch'],
+        goal_duration_ratio=config_params['rl_params']['goal_duration_ratio'],
         latent_dim=config_params['rl_params']['latent_dim'],
         goal_dim=config_params['rl_params']['goal_dim'],
         manager_lr=config_params['rl_params']['manager_lr'],
@@ -97,8 +96,7 @@ def train_hierarchical_rl(training_rl_env: RLEnv, test_environments: List[Flexib
         clip_ratio=config_params['rl_params']['clip_ratio'],
         entropy_coef=config_params['rl_params']['entropy_coef'],
         gae_lambda=config_params['rl_params']['gae_lambda'],
-        train_pi_iters=config_params['rl_params']['train_pi_iters'],
-        train_v_iters=config_params['rl_params']['train_v_iters'],
+        train_per_episode=config_params['rl_params']['train_per_episode'],
         intrinsic_reward_scale=config_params['rl_params']['intrinsic_reward_scale'],
         device=config_params['rl_params']['device'],
         model_save_dir=config_params['result_dirs']['model'],
@@ -122,16 +120,14 @@ def train_hierarchical_rl(training_rl_env: RLEnv, test_environments: List[Flexib
         'test_generalization_results': test_generalization_results
     }
 
-def run_generalization_experiment(test_envs: int, epochs: int = 20, project_name: str = None, device: str = None):
+def run_generalization_experiment():
     """Main experiment function testing sparse/dense reward for flat and hierarchical RL"""
     print("Starting Generalization Experiment (Sparse vs Dense Reward)...")
     print("Testing: Flat vs Hierarchical RL, Sparse vs Dense Reward")
     print("="*70)
     
-    # Override device if specified
-    if device is not None:
-        config.common_rl_params['device'] = device
-        print(f"Using device: {device}")
+    # Use device from config
+    device = config.rl_params['device']
     
     # Create training environment
     print("Creating training and test environments...")
@@ -153,18 +149,17 @@ def run_generalization_experiment(test_envs: int, epochs: int = 20, project_name
     )
     print("Created 1 training environment")
     
-    test_environments = create_random_environments(test_envs, seed_base=10000)
+    test_environments = create_random_environments(config.rl_params.get('test_envs', 30), seed_base=10000)
     print(f"Created {len(test_environments)} test environments")
     
-    # Set project name
-    if project_name is None:
-        project_name = f"{config.simulation_params['num_jobs']}jobs"
+    # Set project name derived from config
+    project_name = f"{config.simulation_params['num_jobs']}jobs"
     
-    # Prepare configs
-    flat_config_sparse = config.get_flat_rl_config()
-    flat_config_dense = config.get_flat_rl_config()
-    hrl_config_sparse = config.get_hierarchical_rl_config()
-    hrl_config_dense = config.get_hierarchical_rl_config()
+    # Prepare configs with organized directory structure
+    flat_config_sparse = config.get_flat_rl_config(project_name=project_name, exp_name="flat_sparse")
+    flat_config_dense = config.get_flat_rl_config(project_name=project_name, exp_name="flat_dense")
+    hrl_config_sparse = config.get_hierarchical_rl_config(project_name=project_name, exp_name="hrl_sparse")
+    hrl_config_dense = config.get_hierarchical_rl_config(project_name=project_name, exp_name="hrl_dense")
     
     # Set reward shaping and epochs
     flat_config_sparse['rl_params']['use_reward_shaping'] = False
@@ -173,25 +168,15 @@ def run_generalization_experiment(test_envs: int, epochs: int = 20, project_name
     hrl_config_dense['rl_params']['use_reward_shaping'] = True
     
     for cfg in [flat_config_sparse, flat_config_dense, hrl_config_sparse, hrl_config_dense]:
-        cfg['rl_params']['epochs'] = epochs
+        cfg['rl_params']['epochs'] = config.rl_params['epochs']
     
-    # Set up result directories
-    for cfg, exp_name in [
-        (flat_config_sparse, 'flat_sparse'),
-        (flat_config_dense, 'flat_dense'),
-        (hrl_config_sparse, 'hrl_sparse'),
-        (hrl_config_dense, 'hrl_dense')
-    ]:
-        for k in cfg['result_dirs']:
-            rel_path = cfg['result_dirs'][k]
-            if rel_path.startswith('result/'):
-                rel_path = rel_path[len('result/'):]
-            cfg['result_dirs'][k] = os.path.join('result', project_name, exp_name, rel_path)
+    # Setup directories
+    for cfg in [flat_config_sparse, flat_config_dense, hrl_config_sparse, hrl_config_dense]:
         config.setup_directories(cfg['result_dirs'])
     
     # Create RL environments
-    training_rl_env_sparse = RLEnv(training_data_handler, alpha=config.common_rl_params['alpha'], use_reward_shaping=False)
-    training_rl_env_dense = RLEnv(training_data_handler, alpha=config.common_rl_params['alpha'], use_reward_shaping=True)
+    training_rl_env_sparse = RLEnv(training_data_handler, alpha=config.rl_params['alpha'], use_reward_shaping=False)
+    training_rl_env_dense = RLEnv(training_data_handler, alpha=config.rl_params['alpha'], use_reward_shaping=True)
     
     # Results storage
     all_results = {}
@@ -272,18 +257,4 @@ def run_generalization_experiment(test_envs: int, epochs: int = 20, project_name
 
 if __name__ == "__main__":
     print("Remember to activate conda environment: conda activate dfjs")
-
-    import argparse
-    parser = argparse.ArgumentParser(description="Run RL generalization experiments (sparse/dense, flat/HRL)")
-    parser.add_argument('--project_name', type=str, default=None, help='Project name for results and wandb (default: <num_jobs>jobs)')
-    parser.add_argument('--epochs', type=int, default=400, help='Number of epochs for each experiment (default: 500)')
-    parser.add_argument('--test_envs', type=int, default=30, help='Number of test environments (default: 30)')
-    parser.add_argument('--device', type=str, default=None, help='Device for training (auto, cpu, cuda, etc.)')
-    args = parser.parse_args()
-
-    all_results, training_table, testing_table = run_generalization_experiment(
-        test_envs=args.test_envs,
-        epochs=args.epochs,
-        project_name=args.project_name,
-        device=args.device
-    )
+    all_results, training_table, testing_table = run_generalization_experiment()

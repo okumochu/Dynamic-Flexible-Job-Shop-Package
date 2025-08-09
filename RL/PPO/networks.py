@@ -35,6 +35,8 @@ class PPOUpdater:
             advantages[t] = gae
         
         returns = advantages + values
+        # Normalize advantages for stability; returns remain unnormalized targets
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         return advantages, returns
     
     @staticmethod
@@ -63,12 +65,13 @@ class PPOUpdater:
     @staticmethod
     def transition_policy_loss(encoded_states, goals, advantages):
         """
-        Compute transition policy loss.
+        Compute transition policy gradient.
         """
         # the current goal means the direction of the transition from s_t to s_t+c
         cosine_alignment = F.cosine_similarity(encoded_states[1:] - encoded_states[:-1], goals[:-1])
         # Use advantages[:-1] to match the size of cosine_alignment (one less element)
-        return -torch.mean(advantages[:-1].detach() * cosine_alignment)
+        adv = advantages[:-1]
+        return -torch.mean(adv.detach() * cosine_alignment)
 
 
 
@@ -84,13 +87,11 @@ class PolicyNetwork(nn.Module):
     def __init__(self, input_dim, action_dim, hidden_dim = 128):
         super().__init__()
         self.policy_network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim // 2),
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, action_dim)
+            nn.Linear(hidden_dim, action_dim)
         )
         self._init_weights()
     def _init_weights(self):
@@ -114,9 +115,7 @@ class ValueNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
+            nn.Linear(hidden_dim, 1)
         )
         self._init_weights()
     def _init_weights(self):
@@ -135,7 +134,7 @@ Following is the hierarchical RL network.
 
 class PerceptualEncoder(nn.Module):
     
-    def __init__(self, input_dim: int, latent_dim: int, hidden_dim: int = 128):
+    def __init__(self, input_dim: int, latent_dim: int, hidden_dim: int = 64):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -163,14 +162,14 @@ class ManagerEncoder(nn.Module):
     Manager-specific encoder that processes PerceptualEncoder output.
     Updates only from manager's value loss.
     """
-    def __init__(self, latent_dim: int, hidden_dim: int = 128):
+    def __init__(self, latent_dim: int, hidden_dim: int = 64):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, latent_dim)
+            # Output must match latent_dim so it can be consumed by ManagerPolicy (GRU input_size=latent_dim)
+            # and the Manager ValueNetwork (which expects latent_dim inputs)
+            nn.Linear(hidden_dim, latent_dim),
         )
         
         # Initialize weights
@@ -196,7 +195,7 @@ class ManagerEncoder(nn.Module):
 class ManagerPolicy(nn.Module):
     """Manager policy network that emits unit-norm goal vectors"""
     
-    def __init__(self, latent_dim: int, hidden_dim: int = 128):
+    def __init__(self, latent_dim: int, hidden_dim: int = 64):
         super().__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -208,9 +207,7 @@ class ManagerPolicy(nn.Module):
         self.policy_network = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, latent_dim)  # Output goal in latent space
+            nn.Linear(hidden_dim, latent_dim),  # Output goal in latent space
         )
         
         # Initialize weights
@@ -246,7 +243,7 @@ class WorkerPolicy(nn.Module):
     """Worker policy network that combines PPO with goal-conditioned policy (policy only)"""
     
     def __init__(self, latent_dim: int, action_dim: int, 
-                 goal_dim: int, hidden_dim: int = 128):
+                 goal_dim: int, hidden_dim: int = 64):
         super().__init__()
         self.latent_dim = latent_dim
         self.action_dim = action_dim
@@ -298,3 +295,116 @@ class WorkerPolicy(nn.Module):
         action_logits = torch.bmm(action_goal_matrix, w_t.unsqueeze(-1)).squeeze(-1)
         
         return action_logits
+
+
+class HybridPolicyNetwork(nn.Module):
+    """
+    Hybrid policy network for PPO agent, outputting both discrete action logits 
+    and continuous action parameters (mean and log_std) for idleness.
+    """
+    def __init__(self, input_dim, discrete_action_dim, continuous_action_dim, hidden_dim=128):
+        super().__init__()
+        self.discrete_action_dim = discrete_action_dim
+        self.continuous_action_dim = continuous_action_dim
+        
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        
+        self.discrete_head = nn.Linear(hidden_dim, discrete_action_dim)
+        # For continuous action (idleness), output mean and log_std
+        self.continuous_mean_head = nn.Linear(hidden_dim, continuous_action_dim)
+        self.continuous_log_std_head = nn.Linear(hidden_dim, continuous_action_dim)
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                nn.init.constant_(module.bias, 0)
+                
+    def forward(self, obs):
+        features = self.feature_extractor(obs)
+        discrete_logits = self.discrete_head(features)
+        continuous_mean = self.continuous_mean_head(features)
+        continuous_log_std = self.continuous_log_std_head(features)
+        
+        # Clamp log_std to avoid numerical instability (e.g., extremely small std)
+        continuous_log_std = torch.clamp(continuous_log_std, min=-20, max=2)
+        
+        return discrete_logits, continuous_mean, continuous_log_std
+
+
+class HybridWorkerPolicy(nn.Module):
+    """
+    Worker policy network that combines PPO with goal-conditioned policy, 
+    outputting both discrete action logits and continuous action parameters (mean and log_std).
+    """
+    def __init__(self, latent_dim: int, discrete_action_dim: int, 
+                 continuous_action_dim: int, goal_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.discrete_action_dim = discrete_action_dim
+        self.continuous_action_dim = continuous_action_dim
+        self.goal_dim = goal_dim
+        
+        # Goal processing (bias-free as specified)
+        self.goal_transform = nn.Linear(latent_dim, goal_dim, bias=False)
+        
+        # Policy backbone for features (shared for discrete and continuous heads)
+        self.policy_backbone = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        
+        # Discrete action head outputs action-goal compatibility matrix
+        self.discrete_action_goal_head = nn.Linear(hidden_dim, discrete_action_dim * goal_dim)
+        
+        # Continuous action heads for mean and log_std
+        self.continuous_mean_head = nn.Linear(hidden_dim, continuous_action_dim)
+        self.continuous_log_std_head = nn.Linear(hidden_dim, continuous_action_dim)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize network weights using orthogonal initialization"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                if module.bias is not None:  # Only initialize bias if it exists
+                    nn.init.constant_(module.bias, 0)
+    
+    def forward(self, z_t, pooled_goals):
+        """
+        Args:
+            z_t: [batch_size, latent_dim] = encoded state
+            pooled_goals: [batch_size, latent_dim] = pooled manager goals
+        Returns:
+            discrete_logits: [batch_size, discrete_action_dim] = discrete action logits
+            continuous_mean: [batch_size, continuous_action_dim] = mean for continuous action
+            continuous_log_std: [batch_size, continuous_action_dim] = log_std for continuous action
+        """
+        
+        # Transform pooled goals to worker space
+        w_t = self.goal_transform(pooled_goals)  # [batch_size, goal_dim]
+        
+        # Policy backbone features
+        features = self.policy_backbone(z_t)
+        
+        # Discrete action head
+        action_goal_logits = self.discrete_action_goal_head(features)  # [batch_size, discrete_action_dim * goal_dim]
+        action_goal_matrix = action_goal_logits.view(-1, self.discrete_action_dim, self.goal_dim)
+        discrete_logits = torch.bmm(action_goal_matrix, w_t.unsqueeze(-1)).squeeze(-1)
+        
+        # Continuous action heads
+        continuous_mean = self.continuous_mean_head(features)
+        continuous_log_std = self.continuous_log_std_head(features)
+        continuous_log_std = torch.clamp(continuous_log_std, min=-20, max=2)
+        
+        return discrete_logits, continuous_mean, continuous_log_std

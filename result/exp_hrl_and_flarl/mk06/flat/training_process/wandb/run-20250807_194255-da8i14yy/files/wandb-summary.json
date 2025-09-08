@@ -1,1 +1,0 @@
-{"policy_loss":-15.490833550691605,"_runtime":23009,"_timestamp":1.7545899861468594e+09,"_step":39599,"episode_performance/episode_makespan":273,"entropy":0.2504396722652018,"episode_performance/episode_twt":4813,"episode_performance/episode_reward":-2543,"value_loss":3045.565803527832,"_wandb":{"runtime":23009},"episode_performance/episode_objective":2543}

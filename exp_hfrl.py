@@ -161,8 +161,10 @@ def run_brandimarte_experiment():
     
     # Use config parameters
     project_name = "exp_hrl_and_flarl"
-    epochs = config.rl_params['epochs']
-    use_reward_shaping = config.rl_params['use_reward_shaping']
+    # Get common parameters (shared by all RL methods)
+    common_params = config.common_rl_params
+    epochs = common_params['epochs']
+    use_reward_shaping = common_params['use_reward_shaping']
     
     print(f"Testing datasets: {list(datasets.keys())}")
     print(f"Training epochs: {epochs}")
@@ -199,7 +201,7 @@ def run_brandimarte_experiment():
             # Create RL environment
             training_rl_env = RLEnv(
                 training_data_handler, 
-                alpha=config.rl_params['alpha'], 
+                alpha=common_params['alpha'], 
                 use_reward_shaping=use_reward_shaping
             )
             

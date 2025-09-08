@@ -145,7 +145,8 @@ def run_hyperparameter_tuning():
     print("="*70)
     
     # Use device from config
-    device = config.rl_params['device']
+    common_params = config.common_rl_params
+    device = common_params['device']
     
     # Create training environment
     print("Creating training environment...")
@@ -183,7 +184,7 @@ def run_hyperparameter_tuning():
         hrl_config['rl_params']['use_reward_shaping'] = use_reward_shaping
         
         for cfg in [flat_config, hrl_config]:
-            cfg['rl_params']['epochs'] = config.rl_params['epochs']
+            cfg['rl_params']['epochs'] = common_params['epochs']
         
         # Setup directories
         config.setup_directories(flat_config['result_dirs'])
@@ -192,7 +193,7 @@ def run_hyperparameter_tuning():
         # Create RL environment
         training_rl_env = RLEnv(
             training_data_handler, 
-            alpha=config.rl_params['alpha'], 
+            alpha=common_params['alpha'], 
             use_reward_shaping=use_reward_shaping
         )
         

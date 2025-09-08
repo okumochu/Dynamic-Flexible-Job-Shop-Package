@@ -127,7 +127,8 @@ def run_generalization_experiment():
     print("="*70)
     
     # Use device from config
-    device = config.rl_params['device']
+    common_params = config.common_rl_params
+    device = common_params['device']
     
     # Create training environment
     print("Creating training and test environments...")
@@ -149,7 +150,7 @@ def run_generalization_experiment():
     )
     print("Created 1 training environment")
     
-    test_environments = create_random_environments(config.rl_params.get('test_envs', 30), seed_base=10000)
+    test_environments = create_random_environments(common_params.get('test_envs', 30), seed_base=10000)
     print(f"Created {len(test_environments)} test environments")
     
     # Set project name derived from config
@@ -168,15 +169,15 @@ def run_generalization_experiment():
     hrl_config_dense['rl_params']['use_reward_shaping'] = True
     
     for cfg in [flat_config_sparse, flat_config_dense, hrl_config_sparse, hrl_config_dense]:
-        cfg['rl_params']['epochs'] = config.rl_params['epochs']
+        cfg['rl_params']['epochs'] = common_params['epochs']
     
     # Setup directories
     for cfg in [flat_config_sparse, flat_config_dense, hrl_config_sparse, hrl_config_dense]:
         config.setup_directories(cfg['result_dirs'])
     
     # Create RL environments
-    training_rl_env_sparse = RLEnv(training_data_handler, alpha=config.rl_params['alpha'], use_reward_shaping=False)
-    training_rl_env_dense = RLEnv(training_data_handler, alpha=config.rl_params['alpha'], use_reward_shaping=True)
+    training_rl_env_sparse = RLEnv(training_data_handler, alpha=common_params['alpha'], use_reward_shaping=False)
+    training_rl_env_dense = RLEnv(training_data_handler, alpha=common_params['alpha'], use_reward_shaping=True)
     
     # Results storage
     all_results = {}

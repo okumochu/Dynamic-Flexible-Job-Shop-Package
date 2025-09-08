@@ -9,7 +9,11 @@ from RL.hierarchical_rl_trainer import HybridHierarchicalRLTrainer
 
 def run_hybrid_training(project_name: Optional[str] = None, run_prefix: str = "hybrid"):
     sim = config.simulation_params
-    rl = config.rl_params
+    # Get both flat and hierarchical RL parameters for hybrid training
+    flat_config = config.get_flat_rl_config()
+    hierarchical_config = config.get_hierarchical_rl_config()
+    rl_flat = flat_config['rl_params']
+    rl_hierarchical = hierarchical_config['rl_params']
     project = project_name or "exp_hrl_and_flarl"
 
     data_handler = FlexibleJobShopDataHandler(
@@ -34,52 +38,52 @@ def run_hybrid_training(project_name: Optional[str] = None, run_prefix: str = "h
 
     env = RLEnvContinuousIdleness(
         data_handler,
-        alpha=rl['alpha'],
-        use_reward_shaping=rl['use_reward_shaping'],
+        alpha=rl_flat['alpha'],  # Use common parameter from flat config
+        use_reward_shaping=rl_flat['use_reward_shaping'],
     )
 
     flat_trainer = HybridFlatRLTrainer(
         env=env,
-        epochs=rl['epochs'],
-        episodes_per_epoch=rl['episodes_per_epoch'],
-        train_per_episode=rl['train_per_episode'],
-        pi_lr=rl['pi_lr'],
-        v_lr=rl['v_lr'],
-        gamma=rl['gamma'],
-        gae_lambda=rl['gae_lambda'],
-        clip_ratio=rl['clip_ratio'],
-        entropy_coef=rl['entropy_coef'],
+        epochs=rl_flat['epochs'],
+        episodes_per_epoch=rl_flat['episodes_per_epoch'],
+        train_per_episode=rl_flat['train_per_episode'],
+        pi_lr=rl_flat['pi_lr'],
+        v_lr=rl_flat['v_lr'],
+        gamma=rl_flat['gamma'],
+        gae_lambda=rl_flat['gae_lambda'],
+        clip_ratio=rl_flat['clip_ratio'],
+        entropy_coef=rl_flat['entropy_coef'],
         project_name=project,
         run_name=f"{run_prefix}_flat",
-        device=rl['device'],
-        target_kl=rl.get('target_kl', 0.01),
-        max_grad_norm=rl.get('max_grad_norm', 0.5),
-        seed=rl.get('seed', 42),
+        device=rl_flat['device'],
+        target_kl=rl_flat.get('target_kl', 0.01),
+        max_grad_norm=rl_flat.get('max_grad_norm', 0.5),
+        seed=rl_flat.get('seed', 42),
     )
     flat_results = flat_trainer.train()
 
     hrl_trainer = HybridHierarchicalRLTrainer(
         env=env,
-        epochs=rl['epochs'],
-        episodes_per_epoch=rl['episodes_per_epoch'],
-        goal_duration_ratio=rl['goal_duration_ratio'],
-        latent_dim=rl['latent_dim'],
-        goal_dim=rl['goal_dim'],
-        manager_lr=rl['manager_lr'],
-        worker_lr=rl['worker_lr'],
-        gamma_manager=rl['gamma_manager'],
-        gamma_worker=rl['gamma_worker'],
-        clip_ratio=rl['clip_ratio'],
-        entropy_coef=rl['entropy_coef'],
-        gae_lambda=rl['gae_lambda'],
-        train_per_episode=rl['train_per_episode'],
-        intrinsic_reward_scale=rl['intrinsic_reward_scale'],
+        epochs=rl_hierarchical['epochs'],
+        episodes_per_epoch=rl_hierarchical['episodes_per_epoch'],
+        goal_duration_ratio=rl_hierarchical['goal_duration_ratio'],
+        latent_dim=rl_hierarchical['latent_dim'],
+        goal_dim=rl_hierarchical['goal_dim'],
+        manager_lr=rl_hierarchical['manager_lr'],
+        worker_lr=rl_hierarchical['worker_lr'],
+        gamma_manager=rl_hierarchical['gamma_manager'],
+        gamma_worker=rl_hierarchical['gamma_worker'],
+        clip_ratio=rl_hierarchical['clip_ratio'],
+        entropy_coef=rl_hierarchical['entropy_coef'],
+        gae_lambda=rl_hierarchical['gae_lambda'],
+        train_per_episode=rl_hierarchical['train_per_episode'],
+        intrinsic_reward_scale=rl_hierarchical['intrinsic_reward_scale'],
         project_name=project,
         run_name=f"{run_prefix}_hrl",
-        device=rl['device'],
-        target_kl=rl.get('target_kl', 0.01),
-        max_grad_norm=rl.get('max_grad_norm', 0.5),
-        seed=rl.get('seed', 42),
+        device=rl_hierarchical['device'],
+        target_kl=rl_hierarchical.get('target_kl', 0.01),
+        max_grad_norm=rl_hierarchical.get('max_grad_norm', 0.5),
+        seed=rl_hierarchical.get('seed', 42),
     )
     hrl_results = hrl_trainer.train()
 

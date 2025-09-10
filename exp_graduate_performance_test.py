@@ -319,7 +319,7 @@ class BenchmarkEvaluator:
         
         return results
     
-    def run_complete_evaluation(self, output_dir: str = "result/graduate_performance_test") -> str:
+    def run_complete_evaluation(self, output_dir: str = None) -> str:
         """
         Run complete evaluation on all benchmark instances.
         
@@ -332,8 +332,12 @@ class BenchmarkEvaluator:
         logger.info("🚀 Starting Graduate Performance Test...")
         logger.info(f"Model: {self.model_path}")
         
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+        # Create output directory using standardized structure
+        if output_dir is None:
+            from config import config
+            output_dir = config.create_experiment_result_dir("exp_graduate_performance_test")
+        else:
+            os.makedirs(output_dir, exist_ok=True)
         
         # Load the trained model
         self.load_model()
@@ -464,8 +468,8 @@ def main():
                        default='result/exp_graph_rl/graph/model/model_final.pt',
                        help='Path to the trained model file')
     parser.add_argument('--output-dir', type=str, 
-                       default='result/graduate_performance_test',
-                       help='Output directory for results')
+                       default=None,
+                       help='Output directory for results (defaults to standardized structure)')
     parser.add_argument('--hurink-limit', type=int, default=5,
                        help='Maximum Hurink instances per category to test')
     

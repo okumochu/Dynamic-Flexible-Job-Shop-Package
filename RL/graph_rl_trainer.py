@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from torch_geometric.data import Batch
 from typing import Dict, List, Tuple, Optional
 
 try:
@@ -55,10 +56,8 @@ class GraphPPOTrainer:
                  gamma: float = None,
                  gae_lambda: float = None,
                  clip_ratio: float = None,
-                 entropy_coef: float = None,
                  value_coef: float = None,
                  max_grad_norm: float = None,
-                 target_kl: float = None,
                  project_name: Optional[str] = None,
                  run_name: Optional[str] = None,
                  device: str = None,
@@ -74,7 +73,7 @@ class GraphPPOTrainer:
         
         # Set defaults from config if not provided
         epochs = epochs if epochs is not None else rl_params['epochs']
-        episodes_per_epoch = episodes_per_epoch if episodes_per_epoch is not None else rl_params['episodes_per_epoch']
+        episodes_per_epoch = episodes_per_epoch or rl_params.get('episodes_per_epoch', 2)
         train_per_episode = train_per_episode if train_per_episode is not None else rl_params['train_per_episode']
         hidden_dim = hidden_dim if hidden_dim is not None else rl_params['hidden_dim']
         num_hgt_layers = num_hgt_layers if num_hgt_layers is not None else rl_params['num_hgt_layers']
@@ -84,10 +83,8 @@ class GraphPPOTrainer:
         gamma = gamma if gamma is not None else rl_params['gamma']
         gae_lambda = gae_lambda if gae_lambda is not None else rl_params['gae_lambda']
         clip_ratio = clip_ratio if clip_ratio is not None else rl_params['clip_ratio']
-        entropy_coef = entropy_coef if entropy_coef is not None else rl_params['entropy_coef']
         value_coef = value_coef if value_coef is not None else rl_params['value_coef']
         max_grad_norm = max_grad_norm if max_grad_norm is not None else rl_params['max_grad_norm']
-        target_kl = target_kl if target_kl is not None else rl_params['target_kl']
         device = device if device is not None else rl_params['device']
         seed = seed if seed is not None else rl_params['seed']
         
@@ -104,10 +101,8 @@ class GraphPPOTrainer:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
-        self.entropy_coef = entropy_coef
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
-        self.target_kl = target_kl
         
         # Episode tracking like flat_rl_trainer
         self.episode_makespans = []
@@ -131,27 +126,33 @@ class GraphPPOTrainer:
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
         
-        # Initialize environment FIRST
-        self.env = GraphRlEnv(problem_data)
+        # Initialize environment with config parameters
+        self.env = GraphRlEnv(problem_data, alpha=rl_params['alpha'])
         print(f"Environment: {self.env.problem_data.num_jobs} jobs, "
               f"{self.env.problem_data.num_machines} machines, "
               f"{self.env.problem_data.num_operations} operations")
+        print(f"Multi-objective weight (alpha): {rl_params['alpha']}")
 
-        # Get an initial observation to determine feature dimensions
-        initial_obs, _ = self.env.reset()
-        op_feature_dim = initial_obs['op'].x.shape[1]
-        machine_feature_dim = initial_obs['machine'].x.shape[1]
+        # Get feature dimensions from GraphState (not from observation)
+        from RL.graph_state import GraphState
+        op_feature_dim, machine_feature_dim, job_feature_dim = GraphState.get_feature_dimensions()
         
-        print(f"Feature dimensions - Operations: {op_feature_dim}, Machines: {machine_feature_dim}")
+        print(f"Feature dimensions - Operations: {op_feature_dim}, Machines: {machine_feature_dim}, Jobs: {job_feature_dim}")
+        
+        # Validate configuration parameters
+        self._validate_config(hidden_dim, num_heads, rl_params)
 
-        # Initialize policy network with the CORRECT dimensions
+        # Initialize policy network with DYNAMIC dimensions from config
         self.policy = HGTPolicy(
             op_feature_dim=op_feature_dim,
             machine_feature_dim=machine_feature_dim,
+            job_feature_dim=job_feature_dim,
             hidden_dim=hidden_dim,
             num_hgt_layers=num_hgt_layers,
             num_heads=num_heads,
-            dropout=rl_params['dropout']
+            dropout=rl_params['dropout'],
+            temporal_dim=rl_params['temporal_dim'],
+            max_temporal_freq=rl_params['max_temporal_freq']
         ).to(self.device)
         
         print(f"Policy network parameters: {sum(p.numel() for p in self.policy.parameters()):,}")
@@ -172,6 +173,38 @@ class GraphPPOTrainer:
         
         print(f"Graph RL Trainer initialized")
         print(f"Environment: {self.env.problem_data.num_jobs} jobs, {self.env.problem_data.num_machines} machines")
+    
+    def _validate_config(self, hidden_dim: int, num_heads: int, rl_params: dict):
+        """Validate configuration parameters for consistency."""
+        
+        # Validate hidden_dim is divisible by num_heads (required for multi-head attention)
+        if hidden_dim % num_heads != 0:
+            raise ValueError(f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads}) "
+                           f"for multi-head attention to work properly.")
+        
+        # Validate alpha parameter range
+        alpha = rl_params['alpha']
+        if not (0.0 <= alpha <= 1.0):
+            raise ValueError(f"Alpha parameter ({alpha}) must be between 0.0 and 1.0. "
+                           f"0.0=pure makespan, 1.0=pure tardiness, 0.5=balanced")
+        
+        # Validate temporal encoding parameters
+        temporal_dim = rl_params['temporal_dim']
+        if temporal_dim <= 0 or temporal_dim % 2 != 0:
+            raise ValueError(f"temporal_dim ({temporal_dim}) must be positive and even for sinusoidal encoding")
+        
+        max_temporal_freq = rl_params['max_temporal_freq']
+        if max_temporal_freq <= 0:
+            raise ValueError(f"max_temporal_freq ({max_temporal_freq}) must be positive")
+        
+        # Log configuration for verification
+        print(f"✓ Configuration validated:")
+        print(f"  Hidden dim: {hidden_dim} (divisible by {num_heads} heads)")
+        print(f"  Multi-objective weight: {alpha} ({'makespan-only' if alpha == 0.0 else 'tardiness-only' if alpha == 1.0 else 'balanced'})")
+        print(f"  Temporal encoding: {temporal_dim}D, max_freq={max_temporal_freq}")
+        print(f"  Dropout: {rl_params['dropout']}")
+        print(f"  Learning rate: {rl_params['pi_lr']}")
+        print(f"  Simplified PPO: No entropy regularization or KL divergence (due to variable action spaces)")
     
     def collect_rollout(self, buffer: GraphPPOBuffer, epoch: int) -> Dict:
         """
@@ -197,55 +230,34 @@ class GraphPPOTrainer:
             
             episode_reward = 0
             episode_steps = 0
-            consecutive_invalid_actions = 0
-            max_invalid_actions = 5  # Prevent getting stuck
             
             # Run episode until completion
             while not self.env.graph_state.is_done() and episode_steps < self.env.max_episode_steps:
                 # Get valid actions from environment info (from last reset or step)
                 env_valid_actions = info.get('valid_actions', [])
                 
-                # Get action from policy with optimized action selection
+                # Get action from policy - always produces valid action logits
                 with torch.no_grad():
                     action_logits, value, _, policy_valid_pairs = self.policy(obs, env_valid_actions)
-                    
-                    if len(action_logits) == 0:
-                        print("Warning: No valid actions available!")
-                        consecutive_invalid_actions += 1
-                        if consecutive_invalid_actions >= max_invalid_actions:
-                            break
-                        continue
                     
                     # Create distribution and sample action
                     dist = Categorical(logits=action_logits)
                     action_idx = dist.sample()
                     log_prob = dist.log_prob(action_idx)
                     
-                    # OPTIMIZED: Direct mapping from action index to environment action
-                    # action_idx corresponds directly to env_valid_actions[action_idx]
-                    if action_idx.item() < len(env_valid_actions):
-                        target_pair = env_valid_actions[action_idx.item()]
-                        
-                        # Find corresponding environment action (this lookup is now much simpler)
-                        env_action = None
-                        for env_action_idx, pair in self.env.action_to_pair_map.items():
-                            if pair == target_pair:
-                                env_action = env_action_idx
-                                break
-                        
-                        if env_action is None:
-                            print(f"Warning: Could not find environment action for pair {target_pair}")
+                    # Direct mapping from action index to environment action
+                    target_pair = env_valid_actions[action_idx.item()]
+                    
+                    # Find corresponding environment action
+                    env_action = None
+                    for env_action_idx, pair in self.env.action_to_pair_map.items():
+                        if pair == target_pair:
+                            env_action = env_action_idx
                             break
-                    else:
-                        print(f"Warning: Action index {action_idx.item()} out of range")
-                        break
                 
                 # Step environment
                 next_obs, reward, terminated, truncated, info = self.env.step(env_action)
                 done = terminated or truncated
-                
-                # Reset invalid action counter on successful action
-                consecutive_invalid_actions = 0
                 
                 # Store experience in buffer
                 buffer.add(
@@ -254,7 +266,7 @@ class GraphPPOTrainer:
                     reward=reward,
                     value=value.cpu().item(),
                     log_prob=log_prob.cpu().item(),
-                    valid_pairs=env_valid_actions,  # Use environment's valid actions (optimization)
+                    valid_pairs=env_valid_actions.copy(),  # Store copy to avoid reference issues
                     done=done
                 )
                 
@@ -262,7 +274,9 @@ class GraphPPOTrainer:
                 episode_reward += reward
                 episode_steps += 1
                 
+                # Store final info when episode ends
                 if done:
+                    final_info = info
                     break
                     
                 obs = next_obs.to(self.device)
@@ -271,30 +285,34 @@ class GraphPPOTrainer:
             epoch_episodes_completed += 1
             epoch_total_steps += episode_steps
             
-            # Track episode metrics - focus on makespan only
+            # Extract final episode metrics from environment
             final_makespan = self.env.graph_state.get_makespan()
             
-            # For single objective optimization, objective = makespan
-            objective = final_makespan
+            # Extract TWT from final episode info if available
+            final_twt = 0.0
+            if 'final_info' in locals() and final_info is not None:
+                final_twt = final_info.get('total_weighted_tardiness', 0.0)
+            else:
+                # Fallback: calculate TWT directly from environment
+                final_twt = self.env._calculate_total_weighted_tardiness()
+            
+            # Calculate multi-objective using alpha parameter  
+            alpha = self.env.alpha  # Get alpha from environment
+            objective = (1 - alpha) * final_makespan + alpha * final_twt
             
             # Store episode metrics
             self.episode_makespans.append(final_makespan)
-            self.episode_twts.append(0.0)  # Keep for compatibility but not used
+            self.episode_twts.append(final_twt)
             self.episode_objectives.append(objective)
             self.episode_rewards.append(episode_reward)
             
             # Store episode metrics for epoch-level aggregation (no individual logging to avoid step conflicts)
         
-        # Get current buffer state for debugging
+        # Get current buffer state
         current_buffer_size = self.buffer.size
         
         return {
-            'episodes_completed': epoch_episodes_completed,
-            'total_steps_collected': epoch_total_steps,
-            'buffer_size_after_collection': current_buffer_size,
-            'mean_episode_reward': np.mean(self.episode_rewards[-self.episodes_per_epoch:]) if len(self.episode_rewards) >= self.episodes_per_epoch else 0,
-            'mean_makespan': np.mean(self.episode_makespans[-self.episodes_per_epoch:]) if len(self.episode_makespans) >= self.episodes_per_epoch else 0,
-            'mean_objective': np.mean(self.episode_objectives[-self.episodes_per_epoch:]) if len(self.episode_objectives) >= self.episodes_per_epoch else 0
+            'episodes_completed': epoch_episodes_completed
         }
     
     def update_policy(self) -> Dict:
@@ -310,7 +328,7 @@ class GraphPPOTrainer:
         batch = self.buffer.get_batch()
         
         if len(batch['observations']) == 0:
-            return {'policy_loss': 0, 'value_loss': 0, 'entropy': 0, 'kl_div': 0, 'optimizer_stepped': False}
+            return {'policy_loss': 0, 'value_loss': 0, 'optimizer_stepped': False}
         
         # Convert batch data to tensors for PPOUpdater
         rewards = torch.as_tensor(batch['rewards'], device=self.device, dtype=torch.float32)
@@ -330,26 +348,23 @@ class GraphPPOTrainer:
         old_log_probs = torch.as_tensor(batch['log_probs'], device=self.device, dtype=torch.float32)
         
         # Multiple epochs of PPO updates
+        # Use episodes_per_epoch as num_ppo_epochs
+        # Use full batch to respect episode boundaries and potential-based reward shaping
         total_policy_loss = 0
         total_value_loss = 0
-        total_entropy = 0
-        total_kl_div = 0
+        num_updates_performed = 0
+        # Use full batch size to maintain episode coherence for potential-based rewards
+        mini_batch_size = len(batch['observations'])
         
-        num_updates = 4  # Number of PPO epochs
-        batch_size = 32   # Mini-batch size
-        
-        for _ in range(num_updates):
-            # Create mini-batches
+        for _ in range(self.episodes_per_epoch):
+            # Shuffle observations while maintaining full batch for episode coherence
             indices = torch.randperm(len(batch['observations']))
             
-            for start_idx in range(0, len(indices), batch_size):
-                end_idx = start_idx + batch_size
+            for start_idx in range(0, len(indices), mini_batch_size):
+                end_idx = start_idx + mini_batch_size
                 mini_batch_indices = indices[start_idx:end_idx]
                 
-                if len(mini_batch_indices) == 0:
-                    continue
-                
-                # Get mini-batch data
+                # Get batch data (full batch for episode coherence)
                 mini_batch_obs = [batch['observations'][i] for i in mini_batch_indices]
                 mini_batch_valid_pairs = [batch['valid_action_pairs'][i] for i in mini_batch_indices]
                 mini_batch_actions = torch.as_tensor([batch['actions'][i] for i in mini_batch_indices], device=self.device)
@@ -357,123 +372,68 @@ class GraphPPOTrainer:
                 mini_batch_returns = returns[mini_batch_indices]
                 mini_batch_old_log_probs = old_log_probs[mini_batch_indices]
                 
-                # Forward pass for each observation in mini-batch
+                # PERFORMANCE CRITICAL: Batched forward pass instead of sequential processing
+                # Create a batch from individual HeteroData observations
+                batch_graphs = Batch.from_data_list([obs.to(self.device) for obs in mini_batch_obs])
+                
+                # Batched forward pass through the policy network
+                batch_action_logits, batch_values = self.policy.forward_batch(batch_graphs, mini_batch_valid_pairs)
+                
+                # Process results for each graph in the batch
                 policy_losses = []
                 value_losses = []
-                entropies = []
-                kl_divs = []
                 
-                for i, obs in enumerate(mini_batch_obs):
-                    obs = obs.to(self.device)
-                    stored_valid_pairs = mini_batch_valid_pairs[i]
-                    action_logits, value, _, valid_pairs = self.policy(obs, stored_valid_pairs)
-                    
-                    if len(action_logits) == 0:
-                        continue
-                    
-                    # Find the action index in current valid pairs
+                for i in range(len(mini_batch_obs)):
+                    action_logits = batch_action_logits[i]  # Action logits for graph i
+                    value = batch_values[i]  # Value estimate for graph i
                     action_idx = mini_batch_actions[i].item()
-                    stored_valid_pairs = mini_batch_valid_pairs[i]
                     
-                    if action_idx >= len(stored_valid_pairs):
-                        continue
-                        
-                    target_pair = stored_valid_pairs[action_idx]
-                    
-                    # Find corresponding index in current valid pairs
-                    current_action_idx = None
-                    for j, pair in enumerate(valid_pairs):
-                        if pair == target_pair:
-                            current_action_idx = j
-                            break
-                    
-                    # If the action is no longer valid, compute logits for the stored valid pairs instead
-                    if current_action_idx is None:
-                        # Get logits for the original valid pairs using the specialized method
-                        stored_action_logits = self.policy.get_action_logits_for_pairs(obs, stored_valid_pairs)
-                        if len(stored_action_logits) > action_idx:
-                            # Use the stored action logits and index
-                            action_logits_to_use = stored_action_logits
-                            current_action_idx = action_idx
-                        else:
-                            continue
+                    # Create distribution and compute log prob for the stored action
+                    if len(action_logits) > 0:
+                        dist = Categorical(logits=action_logits)
+                        new_log_prob = dist.log_prob(torch.as_tensor(action_idx, device=self.device))
                     else:
-                        action_logits_to_use = action_logits
+                        # Handle edge case where no valid actions exist
+                        new_log_prob = torch.tensor(0.0, device=self.device)
                     
-                    # Create distribution and compute log prob
-                    dist = Categorical(logits=action_logits_to_use)
-                    new_log_prob = dist.log_prob(torch.as_tensor(current_action_idx, device=self.device))
-                    
-                    # Compute entropy using tested PPOUpdater
-                    entropy = PPOUpdater.compute_entropy(action_logits_to_use.unsqueeze(0))
-                    
-                    # PPO policy loss using tested PPOUpdater
+                    # PPO policy loss
                     policy_loss = PPOUpdater.ppo_policy_loss(
                         new_log_prob.unsqueeze(0), mini_batch_old_log_probs[i].unsqueeze(0), 
                         mini_batch_advantages[i].unsqueeze(0), self.clip_ratio
                     )
                     
                     # Value loss
-                    value_loss = F.mse_loss(value.squeeze(), mini_batch_returns[i])
+                    value_loss = F.mse_loss(value, mini_batch_returns[i])
                     
-                    # KL divergence (approximate)
-                    kl_div = mini_batch_old_log_probs[i] - new_log_prob
-                    
+                    # Store losses for this sample
                     policy_losses.append(policy_loss)
                     value_losses.append(value_loss)
-                    entropies.append(entropy)
-                    kl_divs.append(kl_div)
                 
-                if not policy_losses:
-                    continue
-                
-                # Combine losses
+                # Combine losses for this mini-batch
                 policy_loss = torch.stack(policy_losses).mean()
                 value_loss = torch.stack(value_losses).mean()
-                entropy_loss = torch.stack(entropies).mean()
-                kl_div = torch.stack(kl_divs).mean()
                 
-                # Total loss
-                loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy_loss
+                # Total loss (simplified: only policy and value losses)
+                loss = policy_loss + self.value_coef * value_loss
                 
                 # Backward pass
                 self.optimizer.zero_grad()
                 loss.backward()
                 
-                # Clip gradients and monitor gradient norms
-                total_norm_before = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                
-                # Check for gradient issues
-                if torch.isnan(total_norm_before) or torch.isinf(total_norm_before):
-                    print(f"Warning: Invalid gradient norm detected: {total_norm_before}")
-                    continue  # Skip this update
+                # Clip gradients
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 
                 self.optimizer.step()
                 
                 # Accumulate statistics
                 total_policy_loss += policy_loss.item()
                 total_value_loss += value_loss.item()
-                total_entropy += entropy_loss.item()
-                total_kl_div += kl_div.item()
-                
-                # Early stopping if KL divergence is too high
-                if kl_div.item() > self.target_kl:
-                    break
-        
-        num_mini_batches = max(1, (len(batch['observations']) // batch_size) * num_updates)
-        
-        # Debug info (removed verbose logging)
-        if len(batch['observations']) > 0 and num_mini_batches > 0:
-            pass  # Debug info available in wandb metrics
+                num_updates_performed += 1
         
         return {
-            'policy_loss': total_policy_loss / max(1, num_mini_batches) if total_policy_loss > 0 else 0.0,
-            'value_loss': total_value_loss / max(1, num_mini_batches) if total_value_loss > 0 else 0.0,
-            'entropy': total_entropy / max(1, num_mini_batches) if total_entropy > 0 else 0.0,
-            'kl_div': total_kl_div / max(1, num_mini_batches) if total_kl_div > 0 else 0.0,
-            'optimizer_stepped': True,
-            'buffer_size': len(batch['observations']),
-            'mini_batches_processed': num_mini_batches
+            'policy_loss': total_policy_loss / num_updates_performed,
+            'value_loss': total_value_loss / num_updates_performed,
+            'optimizer_stepped': True
         }
     
     
@@ -504,7 +464,6 @@ class GraphPPOTrainer:
                     "gamma": self.gamma,
                     "gae_lambda": self.gae_lambda,
                     "clip_ratio": self.clip_ratio,
-                    "entropy_coef": self.entropy_coef,
                     "hidden_dim": self.policy.hidden_dim,
                     "num_hgt_layers": self.policy.num_hgt_layers,
                 }
@@ -525,68 +484,47 @@ class GraphPPOTrainer:
             collection_stats = self.collect_rollout(self.buffer, epoch)
             
             # Update agent multiple times on the same data (standard PPO practice)
-            stats = {'policy_loss': 0, 'value_loss': 0, 'entropy': 0, 'kl_div': 0, 'optimizer_stepped': False}
+            stats = {'policy_loss': 0, 'value_loss': 0, 'optimizer_stepped': False}
             
-            # Only train if we have enough data
-            if self.buffer.size >= max(32, self.episodes_per_epoch // 2):
-                for train_step in range(self.train_per_episode):
-                    step_stats = self.update_policy()
-                    
-                    # Accumulate statistics
-                    for key in ['policy_loss', 'value_loss', 'entropy', 'kl_div']:
-                        stats[key] += step_stats.get(key, 0)
-                    
-                    if step_stats.get('optimizer_stepped', False):
-                        stats['optimizer_stepped'] = True
-                        total_optimization_steps += 1
-                        
-                    # Early stopping if KL divergence is too high
-                    if step_stats.get('kl_div', 0) > self.target_kl:
-                        break
+            # Train with collected data
+            for train_step in range(self.train_per_episode):
+                step_stats = self.update_policy()
                 
-                # Average the statistics
-                num_train_steps = self.train_per_episode
-                for key in ['policy_loss', 'value_loss', 'entropy', 'kl_div']:
-                    stats[key] /= max(1, num_train_steps)
+                # Accumulate statistics
+                for key in ['policy_loss', 'value_loss']:
+                    stats[key] += step_stats.get(key, 0)
                 
-                # Only update learning rate if we actually performed optimization
-                if stats.get('optimizer_stepped', False):
-                    self.scheduler.step()
+                if step_stats.get('optimizer_stepped', False):
+                    stats['optimizer_stepped'] = True
+                    total_optimization_steps += 1
+                    
+            
+            # Average the statistics
+            num_train_steps = self.train_per_episode
+            for key in ['policy_loss', 'value_loss']:
+                stats[key] /= max(1, num_train_steps)
+            
+            # Only update learning rate if we actually performed optimization
+            if stats.get('optimizer_stepped', False):
+                self.scheduler.step()
 
             # Log training metrics
             wandb_log = {
                 "training/policy_loss": stats["policy_loss"],
                 "training/value_loss": stats["value_loss"],
-                "training/entropy": stats["entropy"],
-                "training/kl_div": stats["kl_div"],
-                "training/epoch": epoch,
                 "training/total_episodes": len(self.episode_makespans),
-                "training/learning_rate": self.optimizer.param_groups[0]['lr'],
-                "training/buffer_size": stats.get("buffer_size", 0),
-                "training/mini_batches_processed": stats.get("mini_batches_processed", 0),
-                "training/steps_collected": collection_stats.get("total_steps_collected", 0),
-                "training/buffer_after_collection": collection_stats.get("buffer_size_after_collection", 0)
+                "training/learning_rate": self.optimizer.param_groups[0]['lr']
             }
             
-            # Add collection metrics if available
-            if collection_stats['episodes_completed'] > 0:
-                recent_episodes = self.episodes_per_epoch
-                if len(self.episode_makespans) >= recent_episodes:
-                    recent_makespans = self.episode_makespans[-recent_episodes:]
-                    recent_objectives = self.episode_objectives[-recent_episodes:]
-                    recent_rewards = self.episode_rewards[-recent_episodes:]
-                    
+            # Add latest episode performance metrics if available
+            if collection_stats['episodes_completed'] > 0 and len(self.episode_makespans) > 0:
                 wandb_log.update({
-                        "performance/mean_makespan": collection_stats['mean_makespan'],
-                        "performance/mean_objective": collection_stats['mean_objective'],
-                        "performance/mean_reward": collection_stats['mean_episode_reward'],
-                        "performance/best_makespan": min(recent_makespans),
-                        "performance/worst_makespan": max(recent_makespans),
-                        "performance/makespan_std": np.std(recent_makespans),
-                        "performance/best_objective": min(recent_objectives),
-                        "performance/latest_makespan": recent_makespans[-1],
-                        "performance/latest_reward": recent_rewards[-1],
-                    })
+                    "performance/episode_makespan": self.episode_makespans[-1],
+                    "performance/episode_twt": self.episode_twts[-1],
+                    "performance/episode_objective": self.episode_objectives[-1],
+                    "performance/episode_reward": self.episode_rewards[-1],
+                    "performance/alpha": self.env.alpha  # Log the multi-objective weight
+                })
             
             # Log all metrics with epoch as step
             if WANDB_AVAILABLE:
@@ -598,11 +536,17 @@ class GraphPPOTrainer:
             
             # Progress monitoring
             if (epoch + 1) % 10 == 0:
-                recent_makespans = self.episode_makespans[-20:] if len(self.episode_makespans) >= 20 else self.episode_makespans
-                if recent_makespans:
-                    avg_recent_makespan = np.mean(recent_makespans)
+                if len(self.episode_makespans) > 0:
+                    latest_makespan = self.episode_makespans[-1]
+                    latest_twt = self.episode_twts[-1]
+                    latest_objective = self.episode_objectives[-1]
+                    latest_reward = self.episode_rewards[-1]
                     current_lr = self.optimizer.param_groups[0]['lr']
-                    print(f"Epoch {epoch+1}/{self.epochs}: Recent avg makespan = {avg_recent_makespan:.2f}, LR = {current_lr:.6f}")
+                    alpha = self.env.alpha
+                    print(f"Epoch {epoch+1}/{self.epochs}: Makespan = {latest_makespan:.2f}, "
+                          f"TWT = {latest_twt:.2f}, Objective = {latest_objective:.2f}, "
+                          f"Reward = {latest_reward:.2f}, α = {alpha:.1f}, Policy Loss = {stats['policy_loss']:.4f}, "
+                          f"Value Loss = {stats['value_loss']:.4f}, LR = {current_lr:.6f}")
         
         pbar.close()
         
@@ -637,7 +581,6 @@ class GraphPPOTrainer:
                 'num_hgt_layers': self.policy.num_hgt_layers,
                 'gamma': self.gamma,
                 'clip_ratio': self.clip_ratio,
-                'entropy_coef': self.entropy_coef,
                 'value_coef': self.value_coef
             }
         }, filepath)
@@ -683,8 +626,6 @@ def main():
                        help='GAE lambda')
     parser.add_argument('--clip-ratio', type=float, default=0.2,
                        help='PPO clip ratio')
-    parser.add_argument('--entropy-coef', type=float, default=0.01,
-                       help='Entropy coefficient')
     
     # Network arguments
     parser.add_argument('--hidden-dim', type=int, default=128,
@@ -727,32 +668,22 @@ def main():
           f"{problem_data.num_machines} machines, "
           f"{problem_data.num_operations} operations")
     
-    # Initialize trainer
+    # Initialize trainer with config-driven parameters
     trainer = GraphPPOTrainer(
         problem_data=problem_data,
         hidden_dim=args.hidden_dim,
         num_hgt_layers=args.num_hgt_layers,
         num_heads=args.num_heads,
-        learning_rate=args.learning_rate,
+        pi_lr=args.learning_rate,  # Fixed parameter name
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         clip_ratio=args.clip_ratio,
-        entropy_coef=args.entropy_coef,
-        buffer_size=args.buffer_size,
-        batch_size=args.batch_size,
         device=args.device,
         seed=args.seed
     )
     
-    # Start training
-    trainer.train(
-        total_timesteps=args.total_timesteps,
-        log_interval=args.log_interval,
-        save_interval=args.save_interval,
-        save_path=args.save_path,
-        use_tensorboard=args.use_tensorboard,
-        use_wandb=args.use_wandb
-    )
+    # Start training (using the actual train method signature)
+    trainer.train(seed=args.seed)
 
 
 if __name__ == '__main__':

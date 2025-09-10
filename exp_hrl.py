@@ -29,11 +29,10 @@ def run_hierarchical_rl_experiment():
     exp_config = config.get_hierarchical_rl_config()
     simulation_params = exp_config['simulation_params']
     hrl_params = exp_config['rl_params']
-    result_dirs = exp_config['result_dirs']
+    result_dir = exp_config['result_dir']
     
-    # Setup directories and wandb
-    config.setup_directories(result_dirs)
-    config.setup_wandb_env(result_dirs['training_process'], exp_config['wandb_project'])
+    # Setup wandb
+    config.setup_wandb_env(result_dir, exp_config['wandb_project'])
     
     print("Creating data handler and hierarchical environment...")
     data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
@@ -65,7 +64,7 @@ def run_hierarchical_rl_experiment():
         train_per_episode=hrl_params['train_per_episode'],
         device=hrl_params['device'],
         project_name=exp_config['wandb_project'],
-        model_save_dir=result_dirs['model']
+        model_save_dir=result_dir
     )
     
     print(f"Starting hierarchical training for {hrl_params['epochs']} epochs...")
@@ -73,11 +72,11 @@ def run_hierarchical_rl_experiment():
     print("Hierarchical training complete.")
 
     print(f"Training time: {results['training_time']:.2f} seconds")
-    print(f"Model saved in {result_dirs['model']}, wandb logs in {result_dirs['training_process']}.")
+    print(f"Model saved in {result_dir}, wandb logs in {result_dir}.")
 
     # Deterministic evaluation on training environment
     print("\nEvaluating trained hierarchical policy (deterministic) on training environment...")
-    model_path = os.path.join(result_dirs['model'], results['model_filename'])
+    model_path = os.path.join(result_dir, results['model_filename'])
     evaluation_result = evaluate_hierarchical_policy(model_path, env, num_episodes=1)
     print(f"Final objective: {evaluation_result.get('objective', 0):.2f}")
     print(f"Final makespan: {evaluation_result.get('makespan', 0):.2f}")
@@ -85,7 +84,7 @@ def run_hierarchical_rl_experiment():
 
     # Save evaluation summary CSV similar format
     import pandas as pd
-    os.makedirs(result_dirs['training_process'], exist_ok=True)
+    os.makedirs(result_dir, exist_ok=True)
     reward_label = "Dense" if hrl_params['use_reward_shaping'] else "Sparse"
     run_name_hrl = trainer.run_name if hasattr(trainer, 'run_name') and trainer.run_name else 'hrl'
     df = pd.DataFrame([
@@ -97,7 +96,7 @@ def run_hierarchical_rl_experiment():
             'run_name': run_name_hrl
         }
     ])
-    csv_path = os.path.join(result_dirs['training_process'], 'hrl_results.csv')
+    csv_path = os.path.join(result_dir, 'hrl_results.csv')
     df.to_csv(csv_path, index=False)
     print(f"Saved evaluation CSV to {csv_path}")
     
@@ -113,13 +112,13 @@ def run_hierarchical_rl_experiment():
     
     # Visualize using policy_utils
     print("Creating Gantt chart using policy_utils...")
-    gantt_save_path_evaluation = os.path.join(result_dirs['training_process'], "hierarchical_gantt_evaluation.png")
+    gantt_save_path_evaluation = os.path.join(result_dir, "hierarchical_gantt_evaluation.png")
     visualize_policy_schedule(evaluation_result, env, save_path=gantt_save_path_evaluation)
     
     # Also showcase using hierarchical policy showcase function
     print("Creating Gantt chart using hierarchical showcase function...")
-    gantt_save_path_showcaser = os.path.join(result_dirs['training_process'], "hierarchical_gantt_showcase.png")
-    showcaser_result = showcase_hierarchical_policy(model_path=result_dirs['model'], env=env)
+    gantt_save_path_showcaser = os.path.join(result_dir, "hierarchical_gantt_showcase.png")
+    showcaser_result = showcase_hierarchical_policy(model_path=result_dir, env=env)
     
     # Create Gantt chart separately
     create_gantt_chart(showcaser_result, save_path=gantt_save_path_showcaser, title_suffix="Hierarchical RL")
@@ -132,7 +131,7 @@ def run_hierarchical_rl_experiment():
     print(f"  Valid Completion: {showcaser_result['is_valid_completion']}")
     
     print(f"\nHierarchical RL experiment completed successfully!")
-    print(f"Results saved in: {result_dirs['training_process']}")
+    print(f"Results saved in: {result_dir}")
     
     print(f"\n" + "="*50)
     print("HIERARCHICAL RL EXPERIMENT SUMMARY")

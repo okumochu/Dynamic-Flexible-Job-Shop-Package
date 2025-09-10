@@ -4,7 +4,7 @@ import numpy as np
 from RL.rl_env import RLEnv
 from RL.PPO.flat_agent import FlatAgent
 from RL.PPO.hierarchical_agent import HierarchicalAgent
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
 import plotly.graph_objects as go
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
 
@@ -219,11 +219,18 @@ def create_gantt_chart(evaluation_result: Dict, save_path: str, title_suffix: st
     if fig:
         if title_suffix:
             fig.update_layout(title=f"Gantt Chart - {title_suffix}")
-        # Save directly to HTML (no try/except)
-        alt_path = os.path.splitext(save_path)[0] + ".html" if save_path else None
-        if alt_path:
-            fig.write_html(alt_path, include_plotlyjs="cdn")
-            print(f"Gantt chart saved to {alt_path}")
+        # Save to PNG with fallback to HTML
+        if save_path:
+            try:
+                png_path = os.path.splitext(save_path)[0] + ".png"
+                fig.write_image(png_path, width=1400, height=800, scale=2)
+                print(f"Gantt chart saved to {png_path}")
+            except Exception as e:
+                print(f"Failed to save PNG (may need kaleido): {e}")
+                # Fallback to HTML
+                html_path = os.path.splitext(save_path)[0] + ".html"
+                fig.write_html(html_path, include_plotlyjs="cdn")
+                print(f"Gantt chart saved to {html_path} (fallback)")
     else:
         print("Gantt chart could not be created.")
 
@@ -515,9 +522,297 @@ def visualize_policy_schedule(evaluation_result: Dict, env: RLEnv, save_path: Op
     fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
     
     if save_path and fig is not None:
-        # Save directly to HTML (no try/except)
-        alt_path = os.path.splitext(save_path)[0] + ".html"
-        fig.write_html(alt_path, include_plotlyjs="cdn")
-        print(f"Gantt chart saved to {alt_path}")
+        # Save to PNG with fallback to HTML
+        try:
+            png_path = os.path.splitext(save_path)[0] + ".png"
+            fig.write_image(png_path, width=1400, height=800, scale=2)
+            print(f"Gantt chart saved to {png_path}")
+        except Exception as e:
+            print(f"Failed to save PNG (may need kaleido): {e}")
+            # Fallback to HTML
+            html_path = os.path.splitext(save_path)[0] + ".html"
+            fig.write_html(html_path, include_plotlyjs="cdn")
+            print(f"Gantt chart saved to {html_path} (fallback)")
     
     return fig
+
+
+def convert_graph_schedule_to_machine_schedule(graph_env) -> Dict[int, List[Tuple[int, float]]]:
+    """
+    Convert GraphRlEnv schedule data to SolutionUtils expected format.
+    
+    Args:
+        graph_env: GraphRlEnv instance after episode completion
+        
+    Returns:
+        Dictionary mapping machine_id to list of (operation_id, start_time) tuples
+    """
+    machine_schedule = {}
+    
+    # Initialize empty lists for each machine
+    for machine_id in range(graph_env.problem_data.num_machines):
+        machine_schedule[machine_id] = []
+    
+    # Process each scheduled operation
+    for op_id in range(graph_env.problem_data.num_operations):
+        if graph_env.graph_state.operation_status[op_id] == 1:  # scheduled
+            # Get assigned machine and completion time
+            assigned_machine = graph_env.graph_state.operation_machine_assignments.get(op_id)
+            completion_time = graph_env.graph_state.operation_completion_times[op_id]
+            
+            if assigned_machine is not None:
+                # Calculate start time
+                operation = graph_env.problem_data.get_operation(op_id)
+                processing_time = operation.get_processing_time(assigned_machine)
+                start_time = completion_time - processing_time
+                
+                # Add to machine schedule
+                machine_schedule[assigned_machine].append((op_id, start_time))
+    
+    # Sort operations by start time for each machine
+    for machine_id in machine_schedule:
+        machine_schedule[machine_id].sort(key=lambda x: x[1])
+    
+    return machine_schedule
+
+
+def evaluate_graph_policy_with_visualization(model_path: str, graph_env, trainer, save_path: str = None) -> Dict:
+    """
+    Evaluate a trained graph RL policy and create Gantt chart using SolutionUtils.
+    
+    Args:
+        model_path: Path to the saved model
+        graph_env: Graph RL environment
+        trainer: Graph trainer instance
+        save_path: Optional path to save the Gantt chart
+        
+    Returns:
+        Dictionary with evaluation metrics and visualization
+    """
+    if os.path.exists(model_path):
+        trainer.load_model(model_path)
+        print(f"Loaded model from {model_path}")
+    else:
+        print(f"Model file not found: {model_path}")
+        return {}
+    
+    trainer.policy.eval()
+    
+    # Run one episode to get final state
+    obs, info = graph_env.reset()
+    done = False
+    episode_reward = 0
+    episode_length = 0
+    
+    while not done:
+        obs = obs.to(trainer.device)
+        
+        with torch.no_grad():
+            action_logits, value, action_mask, valid_pairs = trainer.policy(obs)
+            
+            if len(action_logits) == 0:
+                print(f"Warning: No valid actions available")
+                break
+            
+            # Take deterministic action (argmax)
+            action_idx = torch.argmax(action_logits).item()
+            
+            # Convert to environment action
+            if action_idx < len(valid_pairs):
+                target_pair = valid_pairs[action_idx]
+                env_action = None
+                for env_action_idx, pair in graph_env.action_to_pair_map.items():
+                    if pair == target_pair:
+                        env_action = env_action_idx
+                        break
+                
+                if env_action is None:
+                    print(f"Warning: Could not find environment action for pair {target_pair}")
+                    break
+            else:
+                print(f"Warning: Action index {action_idx} out of range")
+                break
+        
+        next_obs, reward, terminated, truncated, next_info = graph_env.step(env_action)
+        
+        episode_reward += reward
+        episode_length += 1
+        done = terminated or truncated
+        
+        if not done:
+            obs = next_obs
+    
+    # Extract final metrics
+    final_makespan = graph_env.graph_state.get_makespan()
+    
+    # Convert schedule to SolutionUtils format
+    machine_schedule = convert_graph_schedule_to_machine_schedule(graph_env)
+    
+    # Create SolutionUtils instance and visualize
+    from utils.solution_utils import SolutionUtils
+    solution_utils = SolutionUtils(graph_env.problem_data, machine_schedule)
+    
+    # Validate the solution
+    validation_result = solution_utils.validate_solution()
+    print(f"Solution validation: {'VALID' if validation_result['is_valid'] else 'INVALID'}")
+    if not validation_result['is_valid']:
+        print("Validation violations:")
+        for violation in validation_result['violations']:
+            print(f"  - {violation}")
+    
+    # Create Gantt chart
+    fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
+    
+    if save_path and fig is not None:
+        # Save to PNG
+        try:
+            png_path = os.path.splitext(save_path)[0] + ".png"
+            fig.write_image(png_path, width=1400, height=800, scale=2)
+            print(f"Gantt chart saved to {png_path}")
+        except Exception as e:
+            print(f"Failed to save PNG (may need kaleido): {e}")
+            # Fallback to HTML
+            html_path = os.path.splitext(save_path)[0] + ".html"
+            fig.write_html(html_path, include_plotlyjs="cdn")
+            print(f"Gantt chart saved to {html_path} (fallback)")
+    
+    # Calculate total weighted tardiness from validation result
+    total_twt = 0.0
+    due_dates = graph_env.problem_data.get_jobs_due_date()
+    weights = graph_env.problem_data.get_jobs_weight()
+    
+    for job_id in range(graph_env.problem_data.num_jobs):
+        job_operations = graph_env.problem_data.get_job_operations(job_id)
+        last_op = job_operations[-1]
+        if last_op.operation_id in validation_result["operation_end_times"]:
+            completion_time = validation_result["operation_end_times"][last_op.operation_id]
+            tardiness = max(0, completion_time - due_dates[job_id])
+            total_twt += weights[job_id] * tardiness
+    
+    # For single objective optimization: objective = makespan
+    objective = final_makespan
+    
+    results = {
+        'episode_reward': episode_reward,
+        'makespan': final_makespan,
+        'twt': total_twt,
+        'objective': objective,
+        'episode_length': episode_length,
+        'is_valid_completion': graph_env.graph_state.is_done(),
+        'validation_result': validation_result,
+        'machine_schedule': machine_schedule,
+        'gantt_figure': fig
+    }
+    
+    print(f"Evaluation complete: "
+          f"Reward={episode_reward:.2f}, "
+          f"Makespan={final_makespan:.2f}, "
+          f"TWT={total_twt:.2f}, "
+          f"Objective={objective:.2f}")
+    
+    return results
+
+
+def create_baseline_gantt_chart(data_handler: FlexibleJobShopDataHandler, save_path: str = None, method: str = "fifo") -> str:
+    """
+    Create a baseline Gantt chart using simple dispatching rules.
+    
+    Args:
+        data_handler: FlexibleJobShopDataHandler instance
+        save_path: Optional path to save the chart
+        method: Dispatching method ('fifo' or 'spt' for shortest processing time)
+        
+    Returns:
+        Path to the saved Gantt chart
+    """
+    from utils.solution_utils import SolutionUtils
+    
+    machine_schedule = {}
+    for machine_id in range(data_handler.num_machines):
+        machine_schedule[machine_id] = []
+    
+    if method.lower() == "fifo":
+        # FIFO: Process operations in job order
+        current_time = [0.0] * data_handler.num_machines
+        
+        for job_id in range(data_handler.num_jobs):
+            job_start_time = 0.0
+            job_operations = data_handler.get_job_operations(job_id)
+            
+            for operation in job_operations:
+                # Find best machine (shortest processing time)
+                best_machine = None
+                best_time = float('inf')
+                
+                for machine_id, proc_time in operation.machine_processing_times.items():
+                    if proc_time < best_time:
+                        best_time = proc_time
+                        best_machine = machine_id
+                
+                if best_machine is not None:
+                    start_time = max(job_start_time, current_time[best_machine])
+                    machine_schedule[best_machine].append((operation.operation_id, start_time))
+                    current_time[best_machine] = start_time + best_time
+                    job_start_time = start_time + best_time
+    
+    elif method.lower() == "spt":
+        # SPT: Shortest Processing Time first (global priority)
+        operations_list = []
+        for job_id in range(data_handler.num_jobs):
+            job_operations = data_handler.get_job_operations(job_id)
+            for op_idx, operation in enumerate(job_operations):
+                min_time = operation.min_processing_time
+                operations_list.append((operation.operation_id, job_id, op_idx, min_time))
+        
+        # Sort by processing time
+        operations_list.sort(key=lambda x: x[3])
+        
+        current_time = [0.0] * data_handler.num_machines
+        job_progress = [0] * data_handler.num_jobs  # Track progress of each job
+        
+        for op_id, job_id, op_idx, _ in operations_list:
+            # Check if this operation can be scheduled (precedence constraint)
+            if op_idx != job_progress[job_id]:
+                continue  # Skip if not the next operation for this job
+            
+            operation = data_handler.get_operation(op_id)
+            
+            # Find best machine for this operation
+            best_machine = None
+            best_time = float('inf')
+            
+            for machine_id, proc_time in operation.machine_processing_times.items():
+                if proc_time < best_time:
+                    best_time = proc_time
+                    best_machine = machine_id
+            
+            if best_machine is not None:
+                start_time = current_time[best_machine]
+                machine_schedule[best_machine].append((op_id, start_time))
+                current_time[best_machine] = start_time + best_time
+                job_progress[job_id] += 1
+    
+    # Create Gantt chart
+    solution_utils = SolutionUtils(data_handler, machine_schedule)
+    validation_result = solution_utils.validate_solution()
+    
+    print(f"Baseline ({method.upper()}) Schedule:")
+    print(f"  Makespan: {validation_result['makespan']:.1f}")
+    print(f"  Valid: {'✅' if validation_result['is_valid'] else '❌'}")
+    
+    fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
+    fig.update_layout(title=f"Baseline Schedule - {method.upper()} Dispatching Rule")
+    
+    if save_path and fig is not None:
+        try:
+            png_path = save_path if save_path.endswith('.png') else save_path + '.png'
+            fig.write_image(png_path, width=1400, height=800, scale=2)
+            print(f"Baseline Gantt chart saved to: {png_path}")
+            return png_path
+        except Exception as e:
+            html_path = save_path.replace('.png', '.html') if save_path.endswith('.png') else save_path + '.html'
+            fig.write_html(html_path, include_plotlyjs="cdn")
+            print(f"Baseline Gantt chart saved to: {html_path}")
+            return html_path
+    
+    return None

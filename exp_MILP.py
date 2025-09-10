@@ -83,9 +83,12 @@ def run_experiment(data_source, data_type: str, time_limit: int = 600, twt_weigh
         # Generate and save Gantt chart (headless, HTML)
         print("   Generating Gantt chart (headless)...")
         fig = solution_utils.draw_gantt(show_due_dates=True)
-        output_dir = os.path.join("result", "milp_experiment")
-        os.makedirs(output_dir, exist_ok=True)
-        html_path = os.path.join(output_dir, "milp_gantt.html")
+        
+        # Create standardized result directory
+        from config import config
+        result_dir = config.create_experiment_result_dir("exp_MILP")
+        
+        html_path = os.path.join(result_dir, "milp_gantt.html")
         fig.write_html(html_path, include_plotlyjs="cdn")
         print(f"   ✓ Gantt chart saved to: {html_path}")
     else:

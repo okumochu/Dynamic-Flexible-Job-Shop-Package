@@ -4,6 +4,7 @@ Reduces code duplication and centralizes parameter management
 """
 
 import os
+import time
 from typing import Dict, Any
 
 class ExperimentConfig:
@@ -12,14 +13,14 @@ class ExperimentConfig:
     def __init__(self):
         # Common simulation parameters
         self.simulation_params = {
-            'num_jobs': 16,
+            'num_jobs': 10,
             'num_machines': 5,
-            'operation_lb': 4,
-            'operation_ub': 4,
-            'processing_time_lb': 5,
-            'processing_time_ub': 10,   
-            'compatible_machines_lb': 2,
-            'compatible_machines_ub': 2,
+            'operation_lb': 5,
+            'operation_ub': 5,
+            'processing_time_lb': 1,
+            'processing_time_ub': 99,
+            'compatible_machines_lb': 1,
+            'compatible_machines_ub': 5,
             'TF': 0.4,
             'RDD': 0.8,
             'seed': 42,
@@ -27,19 +28,19 @@ class ExperimentConfig:
         
         # Common RL parameters (shared by all RL methods)
         self.common_rl_params = {
-            'alpha': 0.5,  # TWT weight in objective
+            'alpha': 0,  # TWT weight in objective
             'gae_lambda': 0.95,
             'clip_ratio': 0.2,
-            'entropy_coef': 0.01,
+            'entropy_coef': 0.01, # graph RL no use
             'value_coef': 0.5,  # Value loss coefficient for PPO
             'use_reward_shaping': True,  # Whether to use dense rewards
             'test_interval': 10,  # How often to test generalization (in epochs)
             'device': 'auto',  # Device for training ('auto', 'cpu', 'cuda', etc.)
             'test_envs': 30,  # Number of test environments for generalization runs
-            'episodes_per_epoch': 1,  # Number of episodes to collect per epoch
-            'epochs': 500,  # Full training run
-            'train_per_episode': 1,  # Number of training iterations per episode
-            'target_kl': 0.01,
+            'episodes_per_epoch': 2,  # Number of episodes to collect per epoch
+            'epochs': 2000,  # Very quick training run for Gantt chart generation
+            'train_per_episode': 2,  # Number of training iterations per episode
+            'target_kl': 0.01, # graph RL no use
             'max_grad_norm': 0.5,
             'seed': 42,
         }
@@ -65,24 +66,59 @@ class ExperimentConfig:
 
         # Graph RL specific parameters
         self.graph_rl_params = {
-            'hidden_dim': 64,  # Hidden dimension for graph networks
-            'num_hgt_layers': 2,  # Number of HGT layers
-            'num_heads': 4,  # Number of attention heads in HGT
+            # Network Architecture
+            'hidden_dim': 128,  # Hidden dimension for graph networks (must be divisible by num_heads)
+            'num_hgt_layers': 4,  # Number of HGT layers
+            'num_heads': 4,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
             'dropout': 0.1,  # Dropout rate for graph networks
+            
+            # Temporal Encoding (for HGT RTE)
+            'temporal_dim': 16,  # Dimension for temporal embeddings in machine_precedes edges
+            'max_temporal_freq': 1000.0,  # Maximum frequency for sinusoidal temporal encoding
+            
+            # Learning Parameters
             'pi_lr': 3e-4,  # Policy learning rate for graph RL
             'v_lr': 3e-4,   # Value function learning rate for graph RL
-            'gamma': 0.99,  # Discount factor for graph RL
+            'gamma': 1,  # Discount factor for graph RL
+            
+            # Multi-Objective Optimization
+            'alpha': 0.5,  # Multi-objective weight: 0.0=pure makespan, 1.0=pure tardiness, 0.5=balanced
+            
+            # Feature Engineering (optional overrides - normally auto-detected)
+            'op_feature_dim': None,  # Override operation feature dimension (None=auto-detect)
+            'machine_feature_dim': None,  # Override machine feature dimension (None=auto-detect)  
+            'job_feature_dim': None,  # Override job feature dimension (None=auto-detect)
         }
     
-    def get_flat_rl_config(self, project_name: str = "exp_hrl_and_flarl", dataset_name: str = None, exp_name: str = "flat") -> Dict[str, Any]:
+    def create_experiment_result_dir(self, experiment_name: str) -> str:
+        """
+        Create a standardized result directory structure for experiments.
+        
+        Args:
+            experiment_name: Name of the experiment file (e.g., 'exp_graph_rl')
+            
+        Returns:
+            Path to the timestamp-based directory where results should be stored
+        """
+        # Base result directory (relative path)
+        base_result_dir = "result"
+        
+        # Create experiment directory
+        experiment_dir = os.path.join(base_result_dir, experiment_name)
+        
+        # Create timestamp directory
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        timestamp_dir = os.path.join(experiment_dir, timestamp)
+        
+        # Create the directories
+        os.makedirs(timestamp_dir, exist_ok=True)
+        
+        return timestamp_dir
+    
+    def get_flat_rl_config(self, experiment_name: str = "exp_rl") -> Dict[str, Any]:
         """Get configuration for flat RL experiment"""
-        # Build organized result directory structure
-        if project_name and dataset_name:
-            base_path = f"result/{project_name}/{dataset_name}/{exp_name}"
-        elif project_name:
-            base_path = f"result/{project_name}/{exp_name}"
-        else:
-            base_path = "result/flat_rl"
+        # Create standardized result directory
+        result_dir = self.create_experiment_result_dir(experiment_name)
             
         # Combine common and flat-specific RL parameters
         rl_params = {**self.common_rl_params, **self.flat_rl_params}
@@ -90,22 +126,14 @@ class ExperimentConfig:
         return {
             'simulation_params': self.simulation_params,
             'rl_params': rl_params,
-            'result_dirs': {
-                'training_process': f"{base_path}/training_process",
-                'model': f"{base_path}/model"
-            },
-            'wandb_project': project_name
+            'result_dir': result_dir,
+            'wandb_project': experiment_name
         }
     
-    def get_hierarchical_rl_config(self, project_name: str = "exp_hrl_and_flarl", dataset_name: str = None, exp_name: str = "hrl") -> Dict[str, Any]:
+    def get_hierarchical_rl_config(self, experiment_name: str = "exp_hrl") -> Dict[str, Any]:
         """Get configuration for hierarchical RL experiment"""
-        # Build organized result directory structure
-        if project_name and dataset_name:
-            base_path = f"result/{project_name}/{dataset_name}/{exp_name}"
-        elif project_name:
-            base_path = f"result/{project_name}/{exp_name}"
-        else:
-            base_path = "result/hierarchical_rl"
+        # Create standardized result directory
+        result_dir = self.create_experiment_result_dir(experiment_name)
             
         # Combine common and hierarchical-specific RL parameters
         rl_params = {**self.common_rl_params, **self.hierarchical_rl_params}
@@ -113,17 +141,19 @@ class ExperimentConfig:
         return {
             'simulation_params': self.simulation_params,
             'rl_params': rl_params,
-            'result_dirs': {
-                'training_process': f"{base_path}/training_process",
-                'model': f"{base_path}/model"
-            },
-            'wandb_project': project_name
+            'result_dir': result_dir,
+            'wandb_project': experiment_name
         }
     
-    def get_brandimarte_config(self, dataset_name: str, dataset_path: str, project_name: str = "brandimarte_experiments") -> Dict[str, Any]:
+    def get_brandimarte_config(self, dataset_name: str, dataset_path: str, experiment_name: str = "exp_graph_rl") -> Dict[str, Any]:
         """Get configuration for Brandimarte dataset experiment"""
         # Use flat RL parameters by default for Brandimarte experiments
         rl_params = {**self.common_rl_params, **self.flat_rl_params}
+        
+        # Create subdirectory for specific dataset within the experiment
+        result_dir = self.create_experiment_result_dir(experiment_name)
+        dataset_result_dir = os.path.join(result_dir, dataset_name)
+        os.makedirs(dataset_result_dir, exist_ok=True)
         
         return {
             'dataset_info': {
@@ -137,22 +167,20 @@ class ExperimentConfig:
                 'seed': self.simulation_params['seed']
             },
             'rl_params': rl_params,  # Can be overridden
-            'result_dirs': {
-                'training_process': f"result/{project_name}/{dataset_name}/flat/training_process",
-                'model': f"result/{project_name}/{dataset_name}/flat/model"
-            },
-            'wandb_project': project_name
+            'result_dir': dataset_result_dir,
+            'wandb_project': experiment_name
         }
     
-    def get_graph_rl_config(self, project_name: str = "exp_graph_rl", dataset_name: str = None, exp_name: str = "graph") -> Dict[str, Any]:
+    def get_graph_rl_config(self, experiment_name: str = "exp_graph_rl", dataset_name: str = None) -> Dict[str, Any]:
         """Get configuration for graph RL experiment"""
-        # Build organized result directory structure
-        if project_name and dataset_name:
-            base_path = f"result/{project_name}/{dataset_name}/{exp_name}"
-        elif project_name:
-            base_path = f"result/{project_name}/{exp_name}"
-        else:
-            base_path = "result/graph_rl"
+        # Create standardized result directory
+        result_dir = self.create_experiment_result_dir(experiment_name)
+        
+        # If dataset_name is provided, create a subdirectory for it
+        if dataset_name:
+            dataset_result_dir = os.path.join(result_dir, dataset_name)
+            os.makedirs(dataset_result_dir, exist_ok=True)
+            result_dir = dataset_result_dir
             
         # Combine common and graph-specific RL parameters
         rl_params = {**self.common_rl_params, **self.graph_rl_params}
@@ -160,11 +188,8 @@ class ExperimentConfig:
         return {
             'simulation_params': self.simulation_params,
             'rl_params': rl_params,
-            'result_dirs': {
-                'training_process': f"{base_path}/training_process",
-                'model': f"{base_path}/model"
-            },
-            'wandb_project': project_name
+            'result_dir': result_dir,
+            'wandb_project': experiment_name
         }
     
 
@@ -189,14 +214,9 @@ class ExperimentConfig:
             'mk15': 'benchmarks/static_benchmark/datasets/brandimarte/mk15.txt'
         }
     
-    def setup_directories(self, result_dirs: Dict[str, str]) -> None:
-        """Create result directories if they don't exist"""
-        for dir_path in result_dirs.values():
-            os.makedirs(dir_path, exist_ok=True)
-    
-    def setup_wandb_env(self, training_dir: str, project_name: str) -> None:
+    def setup_wandb_env(self, result_dir: str, project_name: str) -> None:
         """Setup wandb environment variables"""
-        os.environ["WANDB_DIR"] = training_dir
+        os.environ["WANDB_DIR"] = result_dir
         os.environ["WANDB_PROJECT"] = project_name
 
 # Global config instance

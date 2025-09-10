@@ -6,6 +6,11 @@ Graph-based Reinforcement Learning Experiment for FJSP
 This script runs experiments using Heterogeneous Graph Transformer (HGT) networks
 for solving the Flexible Job Shop Scheduling Problem. It follows the same patterns
 as other experiment files in the project.
+
+Gantt Chart Generation:
+- Uses utils/policy_utils.py for baseline scheduling and policy evaluation
+- Uses utils/solution_utils.py (SolutionUtils) for chart creation and validation
+- Supports both baseline dispatching rules (FIFO, SPT) and trained policies
 """
 
 import os
@@ -36,13 +41,16 @@ def evaluate_graph_policy(model_path: str, env: GraphRlEnv, num_episodes: int = 
     Returns:
         Dictionary with evaluation metrics
     """
-    # Load the trainer and model
+    # Load the trainer and model (use config for consistent initialization)
+    graph_config = config.get_graph_rl_config()
+    rl_params = graph_config['rl_params']
+    
     trainer = GraphPPOTrainer(
         problem_data=env.problem_data,
         epochs=1,  # Dummy values for evaluation
         episodes_per_epoch=1,
         train_per_episode=1,
-        device='auto'
+        device=rl_params['device']
     )
     
     if os.path.exists(model_path):
@@ -151,109 +159,66 @@ def evaluate_graph_policy(model_path: str, env: GraphRlEnv, num_episodes: int = 
     return results
 
 
-def visualize_graph_schedule(evaluation_result: Dict, env: GraphRlEnv, save_path: str) -> Optional[plt.Figure]:
+def create_gantt_chart_from_graph_env(env: GraphRlEnv, save_path: str) -> bool:
     """
-    Create a Gantt chart visualization of the schedule.
+    Create a Gantt chart using SolutionUtils from graph environment state.
     
     Args:
-        evaluation_result: Results from policy evaluation
-        env: Graph RL environment 
+        env: Graph RL environment after episode completion
         save_path: Path to save the visualization
         
     Returns:
-        Matplotlib figure object
+        True if successful, False otherwise
     """
     try:
-        # Get the current state from the environment (assumes environment is in final state)
-        operation_completion_times = env.graph_state.operation_completion_times
+        from utils.policy_utils import convert_graph_schedule_to_machine_schedule
+        from utils.solution_utils import SolutionUtils
         
-        # Create figure
-        fig, ax = plt.subplots(figsize=(14, 8))
+        # Convert graph environment schedule to SolutionUtils format
+        machine_schedule = convert_graph_schedule_to_machine_schedule(env)
         
-        # Colors for different jobs
-        colors = plt.cm.Set3(np.linspace(0, 1, env.problem_data.num_jobs))
+        # Create SolutionUtils instance
+        solution_utils = SolutionUtils(env.problem_data, machine_schedule)
+        
+        # Validate the solution
+        validation_result = solution_utils.validate_solution()
+        print(f"Solution validation: {'VALID' if validation_result['is_valid'] else 'INVALID'}")
+        if not validation_result['is_valid']:
+            print("Validation violations:")
+            for violation in validation_result['violations']:
+                print(f"  - {violation}")
         
         # Create Gantt chart
-        machine_schedules = [[] for _ in range(env.problem_data.num_machines)]
+        fig = solution_utils.draw_gantt(show_validation=True, show_due_dates=True)
         
-        # Collect all operations and their assignments
-        for op_id in range(env.problem_data.num_operations):
-            if env.graph_state.operation_status[op_id] == 1:  # scheduled
-                operation = env.problem_data.get_operation(op_id)
-                job_id, _ = env.problem_data.get_operation_info(op_id)
-                
-                # Find which machine this operation was assigned to
-                completion_time = operation_completion_times[op_id]
-                
-                # Find the machine with the processing time that matches
-                assigned_machine = None
-                for machine_id in operation.compatible_machines:
-                    processing_time = operation.get_processing_time(machine_id)
-                    if env.graph_state.machine_available_times[machine_id] == completion_time:
-                        assigned_machine = machine_id
-                        break
-                
-                if assigned_machine is not None:
-                    processing_time = operation.get_processing_time(assigned_machine)
-                    start_time = completion_time - processing_time
-                    
-                    machine_schedules[assigned_machine].append({
-                        'job_id': job_id,
-                        'op_id': op_id,
-                        'start': start_time,
-                        'duration': processing_time,
-                        'end': completion_time
-                    })
-        
-        # Sort operations by start time for each machine
-        for machine_id in range(env.problem_data.num_machines):
-            machine_schedules[machine_id].sort(key=lambda x: x['start'])
-        
-        # Plot the Gantt chart
-        for machine_id in range(env.problem_data.num_machines):
-            for op_info in machine_schedules[machine_id]:
-                job_id = op_info['job_id']
-                ax.barh(machine_id, op_info['duration'], left=op_info['start'],
-                       height=0.6, color=colors[job_id], alpha=0.8,
-                       edgecolor='black', linewidth=0.5)
-                
-                # Add operation label
-                ax.text(op_info['start'] + op_info['duration']/2, machine_id,
-                       f'J{job_id}O{op_info["op_id"]}',
-                       ha='center', va='center', fontsize=8)
-        
-        # Formatting
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Machine')
-        ax.set_yticks(range(env.problem_data.num_machines))
-        ax.set_yticklabels([f'M{i}' for i in range(env.problem_data.num_machines)])
-        ax.grid(True, alpha=0.3)
-        
-        # Title with metrics
-        makespan = evaluation_result.get('makespan', 0)
-        twt = evaluation_result.get('twt', 0)
-        objective = evaluation_result.get('objective', 0)
-        
-        ax.set_title(f'Graph RL Schedule\n'
-                    f'Makespan: {makespan:.2f}, TWT: {twt:.2f}, Objective: {objective:.2f}')
-        
-        plt.tight_layout()
-        
-        # Save figure
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Gantt chart saved to {save_path}")
-        
-        return fig
-        
+        if fig is not None and save_path:
+            # Save to PNG
+            try:
+                png_path = os.path.splitext(save_path)[0] + ".png"
+                fig.write_image(png_path, width=1400, height=800, scale=2)
+                print(f"Gantt chart saved to {png_path}")
+                return True
+            except Exception as e:
+                print(f"Failed to save PNG (may need kaleido): {e}")
+                # Fallback to HTML
+                html_path = os.path.splitext(save_path)[0] + ".html"
+                fig.write_html(html_path, include_plotlyjs="cdn")
+                print(f"Gantt chart saved to {html_path} (fallback)")
+                return True
+        else:
+            print("Failed to create or save Gantt chart")
+            return False
+            
     except Exception as e:
         print(f"Error creating Gantt chart: {e}")
-        return None
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 def get_graph_rl_config(project_name: str = "exp_graph_rl", dataset_name: str = None, exp_name: str = "graph") -> Dict[str, Any]:
     """Get configuration for graph RL experiment."""
-    return config.get_graph_rl_config(project_name, dataset_name, exp_name)
+    return config.get_graph_rl_config(project_name, dataset_name)
 
 
 def run_single_graph_rl_experiment():
@@ -268,20 +233,19 @@ def run_single_graph_rl_experiment():
     exp_config = get_graph_rl_config()
     simulation_params = exp_config['simulation_params']
     rl_params = exp_config['rl_params']
-    result_dirs = exp_config['result_dirs']
+    result_dir = exp_config['result_dir']
     
-    # Setup directories
-    config.setup_directories(result_dirs)
-    config.setup_wandb_env(result_dirs['training_process'], exp_config['wandb_project'])
+    # Setup wandb
+    config.setup_wandb_env(result_dir, exp_config['wandb_project'])
     
     print("Creating data handler and graph environment...")
     data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
-    env = GraphRlEnv(data_handler)
+    env = GraphRlEnv(data_handler, alpha=rl_params['alpha'])
     
     print(f"Graph environment created: {env.problem_data.num_jobs} jobs, {env.problem_data.num_machines} machines")
     print(f"Total operations: {env.problem_data.num_operations}")
     print(f"Action space size: {env.action_space.n}")
-    print(f"Graph features - Operations: 8, Machines: 2")
+    print(f"Graph features - Operations: 8, Machines: 7, Jobs: 7")
     
     # Create graph trainer using epoch/episode structure like flat_rl_trainer
     trainer = GraphPPOTrainer(
@@ -297,11 +261,10 @@ def run_single_graph_rl_experiment():
         gamma=rl_params['gamma'],
         gae_lambda=rl_params['gae_lambda'],
         clip_ratio=rl_params['clip_ratio'],
-        entropy_coef=rl_params['entropy_coef'],
         device=rl_params['device'],
         project_name=exp_config['wandb_project'],
         run_name="graph_rl_single_experiment",
-        model_save_dir=result_dirs['model'],
+        model_save_dir=result_dir,
         seed=rl_params['seed']
     )
     
@@ -317,7 +280,7 @@ def run_single_graph_rl_experiment():
     # Evaluate the trained policy
     print("\nEvaluating trained graph RL policy...")
     model_filename = training_results['model_filename']
-    model_path = os.path.join(result_dirs['model'], model_filename)
+    model_path = os.path.join(result_dir, model_filename)
     evaluation_result = evaluate_graph_policy(model_path, env, num_episodes=5)
     
     print(f"Final objective: {evaluation_result.get('avg_objective', 0):.2f} ± {evaluation_result.get('std_objective', 0):.2f}")
@@ -336,15 +299,20 @@ def run_single_graph_rl_experiment():
         'training_time': training_time
     }])
     
-    csv_path = os.path.join(result_dirs['training_process'], 'graph_rl_results.csv')
+    csv_path = os.path.join(result_dir, 'graph_rl_results.csv')
     df.to_csv(csv_path, index=False)
     print(f"Results saved to {csv_path}")
     
-    # Create visualization
-    print("Creating Gantt chart visualization...")
-    # Run one more episode to get final state for visualization
+    # Create visualization using SolutionUtils
+    print("Creating Gantt chart visualization using SolutionUtils...")
+    
+    # Run one final episode to get the final schedule state
+    print("Running final episode for visualization...")
     obs, _ = env.reset()
     done = False
+    final_episode_reward = 0
+    episode_length = 0
+    
     while not done:
         obs = obs.to(trainer.device)
         with torch.no_grad():
@@ -363,13 +331,27 @@ def run_single_graph_rl_experiment():
                     break
             else:
                 break
-        next_obs, _, terminated, truncated, _ = env.step(env_action)
+        next_obs, reward, terminated, truncated, _ = env.step(env_action)
+        final_episode_reward += reward
+        episode_length += 1
         done = terminated or truncated
         if not done:
             obs = next_obs
     
-    gantt_save_path = os.path.join(result_dirs['training_process'], "graph_rl_gantt.png")
-    visualize_graph_schedule(evaluation_result, env, gantt_save_path)
+    # Generate baseline Gantt chart for comparison
+    print("Creating baseline FIFO Gantt chart for comparison...")
+    from utils.policy_utils import create_baseline_gantt_chart
+    baseline_path = os.path.join(result_dir, "baseline_fifo_gantt.png")
+    create_baseline_gantt_chart(data_handler, baseline_path, method="fifo")
+    
+    # Generate trained policy Gantt chart from final environment state
+    gantt_save_path = os.path.join(result_dir, "graph_rl_gantt.png")
+    success = create_gantt_chart_from_graph_env(env, gantt_save_path)
+    
+    if success:
+        print("✅ Gantt chart visualization completed successfully!")
+    else:
+        print("❌ Gantt chart visualization failed")
     
     print(f"\n" + "="*50)
     print("GRAPH RL EXPERIMENT SUMMARY")
@@ -421,12 +403,9 @@ def run_brandimarte_graph_rl_experiment():
         
         try:
             # Get configuration
-            exp_config = get_graph_rl_config(project_name, dataset_name, "graph")
-            result_dirs = exp_config['result_dirs']
+            exp_config = get_graph_rl_config(project_name, dataset_name)
+            result_dir = exp_config['result_dir']
             rl_params = exp_config['rl_params']
-            
-            # Setup directories
-            config.setup_directories(result_dirs)
             
             # Load dataset
             print(f"Loading dataset: {dataset_path}")
@@ -443,7 +422,7 @@ def run_brandimarte_graph_rl_experiment():
                   f"Operations: {data_handler.num_operations}")
             
             # Create environment
-            env = GraphRlEnv(data_handler)
+            env = GraphRlEnv(data_handler, alpha=rl_params['alpha'])
             
             # Adjust training parameters for dataset size (reduce epochs for larger datasets)
             adjusted_epochs = min(rl_params['epochs'], max(100, 1000 // (data_handler.num_operations // 10)))
@@ -461,10 +440,9 @@ def run_brandimarte_graph_rl_experiment():
                 gamma=rl_params['gamma'],
                 gae_lambda=rl_params['gae_lambda'],
                 clip_ratio=rl_params['clip_ratio'],
-                entropy_coef=rl_params['entropy_coef'],
                 device=rl_params['device'],
                 seed=rl_params['seed'],
-                model_save_dir=result_dirs['model'],
+                model_save_dir=result_dir,
                 project_name=project_name,
                 run_name=f"graph_rl_{dataset_name}"
             )
@@ -479,7 +457,7 @@ def run_brandimarte_graph_rl_experiment():
             
             # Evaluate
             model_filename = training_results['model_filename']
-            model_path = os.path.join(result_dirs['model'], model_filename)
+            model_path = os.path.join(result_dir, model_filename)
             evaluation_result = evaluate_graph_policy(model_path, env, num_episodes=3)
             
             all_results[dataset_name] = {
@@ -503,7 +481,7 @@ def run_brandimarte_graph_rl_experiment():
                 'training_time': training_time
             }])
             
-            csv_path = os.path.join(result_dirs['training_process'], f'{dataset_name}_results.csv')
+            csv_path = os.path.join(result_dir, f'{dataset_name}_results.csv')
             df.to_csv(csv_path, index=False)
             
         except Exception as e:

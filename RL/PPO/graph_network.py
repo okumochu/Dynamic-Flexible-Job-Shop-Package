@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from torch_geometric.data import HeteroData
+from torch_geometric.data import HeteroData, Batch
 from torch_geometric.nn import HGTConv, Linear
 from typing import Dict, List, Tuple, Optional
 
@@ -129,22 +129,28 @@ class HGTPolicy(nn.Module):
     """
     
     def __init__(self,
-                 op_feature_dim: int = 8,
-                 machine_feature_dim: int = 2,
-                 hidden_dim: int = 128,
-                 num_hgt_layers: int = 3,
-                 num_heads: int = 4,
-                 dropout: float = 0.1):
+                 op_feature_dim: int,  # Dynamic: determined from graph state structure
+                 machine_feature_dim: int,  # Dynamic: determined from graph state structure
+                 job_feature_dim: int,  # Dynamic: determined from graph state structure
+                 hidden_dim: int,  # From config.graph_rl_params['hidden_dim']
+                 num_hgt_layers: int,  # From config.graph_rl_params['num_hgt_layers']
+                 num_heads: int,  # From config.graph_rl_params['num_heads']
+                 dropout: float,  # From config.graph_rl_params['dropout']
+                 temporal_dim: int = 16,  # From config.graph_rl_params['temporal_dim']
+                 max_temporal_freq: float = 1000.0):  # From config.graph_rl_params['max_temporal_freq']
         """
-        Initialize the HGT Policy Network.
+        Initialize the HGT Policy Network with hierarchical job-operation-machine structure.
         
         Args:
-            op_feature_dim: Dimensionality of operation node features
-            machine_feature_dim: Dimensionality of machine node features  
-            hidden_dim: Hidden dimension for embeddings and HGT layers
-            num_hgt_layers: Number of HGT conv layers
-            num_heads: Number of attention heads in HGT
-            dropout: Dropout rate
+            op_feature_dim: Dimensionality of operation node features (auto-detected: 8)
+            machine_feature_dim: Dimensionality of machine node features (auto-detected: 7) 
+            job_feature_dim: Dimensionality of job node features (auto-detected: 7)
+            hidden_dim: Hidden dimension for embeddings and HGT layers (from config)
+            num_hgt_layers: Number of HGT conv layers (from config)
+            num_heads: Number of attention heads in HGT (from config)
+            dropout: Dropout rate (from config)
+            temporal_dim: Dimension for temporal embeddings in RTE (from config)
+            max_temporal_freq: Maximum frequency for sinusoidal temporal encoding (from config)
         """
         super().__init__()
         
@@ -152,18 +158,31 @@ class HGTPolicy(nn.Module):
         self.num_hgt_layers = num_hgt_layers
         self.dropout = dropout
         
-        # Input embedding layers for different node types
+        # Input embedding layers for different node types (EXTENDED: includes job nodes)
         self.op_embedding = Linear(op_feature_dim, hidden_dim, bias=True, weight_initializer='glorot')
         self.machine_embedding = Linear(machine_feature_dim, hidden_dim, bias=True, weight_initializer='glorot')
+        self.job_embedding = Linear(job_feature_dim, hidden_dim, bias=True, weight_initializer='glorot')  # NEW
         
-        # Temporal HGT layers for message passing with RTE
+        # Temporal HGT layers for message passing with RTE (EXTENDED: hierarchical structure)
         self.hgt_layers = nn.ModuleList()
-        metadata = (['op', 'machine'], [('op', 'precedes', 'op'),
-                                       ('op', 'machine_precedes', 'op'),  # CRITICAL: Disjunctive arcs with temporal info
-                                       ('op', 'on_machine', 'machine'),
-                                       ('op', 'assigned_to', 'machine'),
-                                       ('machine', 'can_process', 'op'),
-                                       ('machine', 'processes', 'op')])
+        metadata = (
+            ['op', 'machine', 'job'],  # NEW: Added job nodes for hierarchical structure
+            [
+                # Job-operation hierarchy (NEW: hierarchical edges)
+                ('job', 'contains', 'op'),
+                ('op', 'belongs_to', 'job'),
+                
+                # Operation precedence and machine scheduling
+                ('op', 'precedes', 'op'),
+                ('op', 'machine_precedes', 'op'),  # CRITICAL: Disjunctive arcs with temporal info
+                
+                # Operation-machine compatibility and assignment
+                ('op', 'on_machine', 'machine'),
+                ('op', 'assigned_to', 'machine'),
+                ('machine', 'can_process', 'op'),
+                ('machine', 'processes', 'op')
+            ]
+        )
         
         for _ in range(num_hgt_layers):
             self.hgt_layers.append(
@@ -172,7 +191,8 @@ class HGTPolicy(nn.Module):
                     out_channels=hidden_dim,
                     metadata=metadata,
                     heads=num_heads,
-                    temporal_dim=16  # Dimension for temporal embeddings
+                    temporal_dim=temporal_dim,  # From config parameter
+                    max_temporal_freq=max_temporal_freq  # From config parameter
                 )
             )
         
@@ -198,9 +218,10 @@ class HGTPolicy(nn.Module):
             nn.Linear(hidden_dim // 2, 1)  # Single value estimate
         )
         
-        # Layer normalization
+        # Layer normalization (EXTENDED: includes job nodes)
         self.op_norm = nn.LayerNorm(hidden_dim)
         self.machine_norm = nn.LayerNorm(hidden_dim)
+        self.job_norm = nn.LayerNorm(hidden_dim)  # NEW
         
         self._init_weights()
     
@@ -223,7 +244,7 @@ class HGTPolicy(nn.Module):
                 nn.init.orthogonal_(module.weight, gain=0.01)
                 nn.init.zeros_(module.bias)
     
-    def forward(self, hetero_data: HeteroData, valid_action_pairs: Optional[List[Tuple[int, int]]] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[Tuple[int, int]]]:
+    def forward(self, hetero_data: HeteroData, valid_action_pairs: Optional[List[Tuple[int, int]]] = None) -> Tuple[torch.Tensor, torch.Tensor, None, List[Tuple[int, int]]]:
         """
         Forward pass through the HGT network with optimized action selection.
         
@@ -235,25 +256,29 @@ class HGTPolicy(nn.Module):
         Returns:
             action_logits: Logits for valid (operation, machine) pairs [num_valid_actions]
             value: Global value estimate [1]
-            action_mask: Boolean mask for valid actions [num_total_possible_actions]
+            action_mask: None (not used, saves memory)
             valid_action_pairs: List of (op_idx, machine_idx) pairs corresponding to logits
         """
-        # Extract node features and edge indices
+        # Extract node features and edge indices (EXTENDED: includes job nodes)
         op_x = hetero_data['op'].x  # [num_ops, op_feature_dim]
         machine_x = hetero_data['machine'].x  # [num_machines, machine_feature_dim]
+        job_x = hetero_data['job'].x  # [num_jobs, job_feature_dim] NEW
         
         # Embed node features to hidden dimension
         op_embeddings = self.op_embedding(op_x)  # [num_ops, hidden_dim]
         machine_embeddings = self.machine_embedding(machine_x)  # [num_machines, hidden_dim]
+        job_embeddings = self.job_embedding(job_x)  # [num_jobs, hidden_dim] NEW
         
         # Apply layer normalization
         op_embeddings = self.op_norm(op_embeddings)
         machine_embeddings = self.machine_norm(machine_embeddings)
+        job_embeddings = self.job_norm(job_embeddings)  # NEW
         
-        # Create node embedding dictionary for HGT
+        # Create node embedding dictionary for HGT (EXTENDED: includes job embeddings)
         x_dict = {
             'op': op_embeddings,
-            'machine': machine_embeddings
+            'machine': machine_embeddings,
+            'job': job_embeddings  # NEW: hierarchical job information
         }
         
         # Extract edge indices (handle missing edge types gracefully)
@@ -286,12 +311,13 @@ class HGTPolicy(nn.Module):
             if hasattr(edge_data, 'edge_attr') and edge_data.edge_attr is not None:
                 edge_attr_dict[('op', 'machine_precedes', 'op')] = edge_data.edge_attr
         
-        # Apply Temporal HGT layers with edge attributes
+        # Apply Temporal HGT layers with edge attributes (EXTENDED: includes job embeddings)
         for hgt_layer in self.hgt_layers:
             x_dict = hgt_layer(x_dict, edge_index_dict, edge_attr_dict)
-            # Apply dropout and residual connections
+            # Apply dropout to all node types
             x_dict['op'] = F.dropout(x_dict['op'], p=self.dropout, training=self.training)
             x_dict['machine'] = F.dropout(x_dict['machine'], p=self.dropout, training=self.training)
+            x_dict['job'] = F.dropout(x_dict['job'], p=self.dropout, training=self.training)  # NEW
         
         # Get final embeddings
         final_op_embeddings = x_dict['op']  # [num_ops, hidden_dim]
@@ -324,21 +350,146 @@ class HGTPolicy(nn.Module):
             # No valid actions - return empty tensor
             action_logits = torch.empty(0, device=op_x.device)
         
-        # Compute global value estimate using mean pooling of all node embeddings
+        # Compute global value estimate using mean pooling of all node embeddings (EXTENDED: includes jobs)
+        final_job_embeddings = x_dict['job']  # [num_jobs, hidden_dim] NEW
+        
         all_embeddings = torch.cat([
             final_op_embeddings.mean(dim=0, keepdim=True),
-            final_machine_embeddings.mean(dim=0, keepdim=True)
-        ], dim=0)  # [2, hidden_dim]
+            final_machine_embeddings.mean(dim=0, keepdim=True),
+            final_job_embeddings.mean(dim=0, keepdim=True)  # NEW: job-level global information
+        ], dim=0)  # [3, hidden_dim]
         
         global_embedding = all_embeddings.mean(dim=0)  # [hidden_dim]
         value = self.value_head(global_embedding)  # [1]
         
-        # Create full action mask for all possible (op, machine) pairs
-        num_ops = op_x.shape[0]
-        num_machines = machine_x.shape[0]
-        action_mask = self._create_full_action_mask(hetero_data, valid_pairs_to_use, num_ops, num_machines)
+        return action_logits, value, None, valid_pairs_to_use
+    
+    def forward_batch(self, batch: Batch, batch_valid_action_pairs: List[List[Tuple[int, int]]]) -> Tuple[List[torch.Tensor], torch.Tensor]:
+        """
+        PERFORMANCE CRITICAL: Batched forward pass for multiple graphs.
         
-        return action_logits, value, action_mask, valid_pairs_to_use
+        This method processes multiple HeteroData graphs in parallel, providing
+        significant GPU utilization improvements over sequential processing.
+        
+        Args:
+            batch: torch_geometric.data.Batch containing multiple HeteroData graphs
+            batch_valid_action_pairs: List of valid action pairs for each graph in the batch
+            
+        Returns:
+            batch_action_logits: List of action logits tensors for each graph
+            batch_values: Tensor of value estimates for each graph [batch_size]
+        """
+        # Extract node features and edge indices from batched graph (EXTENDED: includes job nodes)
+        op_x = batch['op'].x  # [total_ops_across_batch, op_feature_dim]
+        machine_x = batch['machine'].x  # [total_machines_across_batch, machine_feature_dim]
+        job_x = batch['job'].x  # [total_jobs_across_batch, job_feature_dim] NEW
+        
+        # Embed node features to hidden dimension
+        op_embeddings = self.op_embedding(op_x)  # [total_ops_across_batch, hidden_dim]
+        machine_embeddings = self.machine_embedding(machine_x)  # [total_machines_across_batch, hidden_dim]
+        job_embeddings = self.job_embedding(job_x)  # [total_jobs_across_batch, hidden_dim] NEW
+        
+        # Apply layer normalization
+        op_embeddings = self.op_norm(op_embeddings)
+        machine_embeddings = self.machine_norm(machine_embeddings)
+        job_embeddings = self.job_norm(job_embeddings)  # NEW
+        
+        # Create node embedding dictionary for HGT (EXTENDED: includes job embeddings)
+        x_dict = {
+            'op': op_embeddings,
+            'machine': machine_embeddings,
+            'job': job_embeddings  # NEW: hierarchical job information
+        }
+        
+        # Extract edge indices (handle missing edge types gracefully)
+        edge_index_dict = {}
+        edge_attr_dict = {}
+        
+        # Process all edge types from the batch
+        for edge_type in batch.edge_types:
+            if hasattr(batch[edge_type], 'edge_index'):
+                edge_index_dict[edge_type] = batch[edge_type].edge_index
+                
+                # Handle edge attributes for temporal encoding
+                if edge_type == ('op', 'machine_precedes', 'op') and hasattr(batch[edge_type], 'edge_attr'):
+                    edge_attr_dict[edge_type] = batch[edge_type].edge_attr
+        
+        # Apply Temporal HGT layers with edge attributes (EXTENDED: includes job embeddings)
+        for hgt_layer in self.hgt_layers:
+            x_dict = hgt_layer(x_dict, edge_index_dict, edge_attr_dict)
+            # Apply dropout to all node types
+            x_dict['op'] = F.dropout(x_dict['op'], p=self.dropout, training=self.training)
+            x_dict['machine'] = F.dropout(x_dict['machine'], p=self.dropout, training=self.training)
+            x_dict['job'] = F.dropout(x_dict['job'], p=self.dropout, training=self.training)  # NEW
+        
+        # Get final embeddings (EXTENDED: includes job embeddings)
+        final_op_embeddings = x_dict['op']  # [total_ops_across_batch, hidden_dim]
+        final_machine_embeddings = x_dict['machine']  # [total_machines_across_batch, hidden_dim]
+        final_job_embeddings = x_dict['job']  # [total_jobs_across_batch, hidden_dim] NEW
+        
+        # Split embeddings back to individual graphs using batch indices
+        op_batch_slices = []
+        machine_batch_slices = []
+        job_batch_slices = []  # NEW
+        
+        # Get batch information
+        op_batch = batch['op'].batch  # [total_ops_across_batch] - which graph each op belongs to
+        machine_batch = batch['machine'].batch  # [total_machines_across_batch] - which graph each machine belongs to
+        job_batch = batch['job'].batch  # [total_jobs_across_batch] - which graph each job belongs to NEW
+        batch_size = batch.num_graphs
+        
+        # Split embeddings by graph
+        for graph_idx in range(batch_size):
+            op_mask = (op_batch == graph_idx)
+            machine_mask = (machine_batch == graph_idx)
+            job_mask = (job_batch == graph_idx)  # NEW
+            
+            op_batch_slices.append(final_op_embeddings[op_mask])
+            machine_batch_slices.append(final_machine_embeddings[machine_mask])
+            job_batch_slices.append(final_job_embeddings[job_mask])  # NEW
+        
+        # Compute action logits for each graph
+        batch_action_logits = []
+        batch_values = []
+        
+        for graph_idx in range(batch_size):
+            graph_op_embeddings = op_batch_slices[graph_idx]  # [num_ops_in_graph, hidden_dim]
+            graph_machine_embeddings = machine_batch_slices[graph_idx]  # [num_machines_in_graph, hidden_dim]
+            graph_job_embeddings = job_batch_slices[graph_idx]  # [num_jobs_in_graph, hidden_dim] NEW
+            valid_pairs = batch_valid_action_pairs[graph_idx]
+            
+            # Compute action logits for this graph (vectorized where possible)
+            if valid_pairs:
+                # Use vectorized approach when we have valid pairs
+                op_indices = torch.tensor([pair[0] for pair in valid_pairs], dtype=torch.long, device=graph_op_embeddings.device)
+                machine_indices = torch.tensor([pair[1] for pair in valid_pairs], dtype=torch.long, device=graph_machine_embeddings.device)
+                
+                # Extract embeddings for valid pairs
+                valid_op_embeds = graph_op_embeddings[op_indices]  # [num_valid_actions, hidden_dim]
+                valid_machine_embeds = graph_machine_embeddings[machine_indices]  # [num_valid_actions, hidden_dim]
+                
+                # Concatenate and compute logits in batch
+                combined_embeddings = torch.cat([valid_op_embeds, valid_machine_embeds], dim=1)  # [num_valid_actions, 2*hidden_dim]
+                action_logits = self.action_head(combined_embeddings).squeeze(-1)  # [num_valid_actions]
+            else:
+                action_logits = torch.empty(0, device=op_x.device)
+            
+            batch_action_logits.append(action_logits)
+            
+            # Compute value estimate for this graph (EXTENDED: includes job embeddings)
+            op_pool = graph_op_embeddings.mean(dim=0)  # [hidden_dim]
+            machine_pool = graph_machine_embeddings.mean(dim=0)  # [hidden_dim]
+            job_pool = graph_job_embeddings.mean(dim=0)  # [hidden_dim] NEW
+            
+            all_embeddings = torch.cat([op_pool.unsqueeze(0), machine_pool.unsqueeze(0), job_pool.unsqueeze(0)], dim=0)  # [3, hidden_dim]
+            global_embedding = all_embeddings.mean(dim=0)  # [hidden_dim]
+            value = self.value_head(global_embedding)  # [1]
+            batch_values.append(value)
+        
+        # Stack values into a single tensor
+        batch_values = torch.stack(batch_values).squeeze(-1)  # [batch_size]
+        
+        return batch_action_logits, batch_values
     
     def _get_valid_action_pairs(self, hetero_data: HeteroData) -> List[Tuple[int, int]]:
         """
@@ -368,36 +519,7 @@ class HGTPolicy(nn.Module):
         
         return valid_pairs
     
-    def _create_full_action_mask(self, hetero_data: HeteroData, valid_pairs: List[Tuple[int, int]], 
-                                num_ops: int, num_machines: int) -> torch.Tensor:
-        """
-        Create a full action mask for all possible (op, machine) combinations.
-        
-        This is used for environments that expect a fixed-size action space.
-        """
-        # Create mapping from (op, machine) pair to linear index
-        total_actions = 0
-        pair_to_idx = {}
-        
-        # Build mapping based on actual compatibility (from edges)
-        if ('op', 'on_machine', 'machine') in hetero_data.edge_types:
-            edge_index = hetero_data['op', 'on_machine', 'machine'].edge_index
-            for i in range(edge_index.shape[1]):
-                op_idx = int(edge_index[0, i].item())
-                machine_idx = int(edge_index[1, i].item())
-                pair_to_idx[(op_idx, machine_idx)] = total_actions
-                total_actions += 1
-        
-        # Create boolean mask
-        if total_actions > 0:
-            action_mask = torch.zeros(total_actions, dtype=torch.bool, device=hetero_data['op'].x.device)
-            for op_idx, machine_idx in valid_pairs:
-                if (op_idx, machine_idx) in pair_to_idx:
-                    action_mask[pair_to_idx[(op_idx, machine_idx)]] = True
-        else:
-            action_mask = torch.empty(0, dtype=torch.bool, device=hetero_data['op'].x.device)
-        
-        return action_mask
+
     
     def get_action_logits_for_pairs(self, hetero_data: HeteroData, 
                                    action_pairs: List[Tuple[int, int]]) -> torch.Tensor:

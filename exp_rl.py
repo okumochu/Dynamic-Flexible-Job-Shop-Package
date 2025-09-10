@@ -22,11 +22,10 @@ def run_flat_rl_experiment():
     exp_config = config.get_flat_rl_config()
     simulation_params = exp_config['simulation_params']
     rl_params = exp_config['rl_params']
-    result_dirs = exp_config['result_dirs']
+    result_dir = exp_config['result_dir']
     
-    # Setup directories and wandb
-    config.setup_directories(result_dirs)
-    config.setup_wandb_env(result_dirs['training_process'], exp_config['wandb_project'])
+    # Setup wandb
+    config.setup_wandb_env(result_dir, exp_config['wandb_project'])
     
     print("Creating data handler and environment...")
     data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
@@ -50,18 +49,18 @@ def run_flat_rl_experiment():
         entropy_coef=rl_params['entropy_coef'],
         device=rl_params['device'],
         project_name=exp_config['wandb_project'],
-        model_save_dir=result_dirs['model']
+        model_save_dir=result_dir
     )
     
     print(f"Starting training for {rl_params['epochs']} epochs...")
     results = trainer.train()
     print("Training complete.")
         
-    print(f"Model saved in {result_dirs['model']}, wandb logs in {result_dirs['training_process']}.")
+    print(f"Model saved in {result_dir}, wandb logs in {result_dir}.")
     
     # Deterministic evaluation on training environment
     print("\nEvaluating trained policy (deterministic) on training environment...")
-    model_path = os.path.join(result_dirs['model'], results['model_filename'])
+    model_path = os.path.join(result_dir, results['model_filename'])
     evaluation_result = evaluate_flat_policy(model_path, env, num_episodes=1)
     print(f"Final objective: {evaluation_result.get('objective', 0):.2f}")
     print(f"Final makespan: {evaluation_result.get('makespan', 0):.2f}")
@@ -69,7 +68,7 @@ def run_flat_rl_experiment():
 
     # Save evaluation summary CSV similar to mk06_results_dense.csv
     import pandas as pd
-    os.makedirs(result_dirs['training_process'], exist_ok=True)
+    os.makedirs(result_dir, exist_ok=True)
     reward_label = "Dense" if rl_params['use_reward_shaping'] else "Sparse"
     run_name_flat = trainer.run_name if hasattr(trainer, 'run_name') and trainer.run_name else 'flat'
     df = pd.DataFrame([
@@ -81,19 +80,19 @@ def run_flat_rl_experiment():
             'run_name': run_name_flat
         }
     ])
-    csv_path = os.path.join(result_dirs['training_process'], 'flat_results.csv')
+    csv_path = os.path.join(result_dir, 'flat_results.csv')
     df.to_csv(csv_path, index=False)
     print(f"Saved evaluation CSV to {csv_path}")
     
     # Visualize using policy_utils
     print("Creating Gantt chart using policy_utils...")
-    gantt_save_path_trainer = os.path.join(result_dirs['training_process'], "gantt_evaluation.png")
+    gantt_save_path_trainer = os.path.join(result_dir, "gantt_evaluation.png")
     visualize_policy_schedule(evaluation_result, env, save_path=gantt_save_path_trainer)
     
     # Also showcase using flat policy showcase function
     print("Creating Gantt chart using showcase function...")
-    gantt_save_path_showcaser = os.path.join(result_dirs['training_process'], "gantt_showcase.png")
-    model_path = os.path.join(result_dirs['model'], "final_model.pth")
+    gantt_save_path_showcaser = os.path.join(result_dir, "gantt_showcase.png")
+    model_path = os.path.join(result_dir, "final_model.pth")
     showcaser_result = showcase_flat_policy(model_path=model_path, env=env)
     
     # Create Gantt chart separately
@@ -107,7 +106,7 @@ def run_flat_rl_experiment():
     print(f"  Valid Completion: {showcaser_result['is_valid_completion']}")
     
     print(f"\nFlat RL experiment completed successfully!")
-    print(f"Results saved in: {result_dirs['training_process']}")
+    print(f"Results saved in: {result_dir}")
     
     print(f"\n" + "="*50)
     print("FLAT RL EXPERIMENT SUMMARY")

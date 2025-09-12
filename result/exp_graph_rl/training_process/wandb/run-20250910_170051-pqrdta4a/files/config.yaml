@@ -1,0 +1,78 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            1ur268olf2bcjhl5impppmon9se4ualg:
+                codePath: exp_graph_rl.py
+                codePathLocal: exp_graph_rl.py
+                cpu_count: 32
+                cpu_count_logical: 64
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "588412764160"
+                        used: "425789345792"
+                email: okumochu55@gmail.com
+                executable: /home/r13725046okumo/miniconda3/envs/dfjs/bin/python
+                git:
+                    commit: cdaf2ed73a0ff8d471caa5497e57e1eb63e7028d
+                    remote: git@github.com:okumochu/Dynamic-Flexible-Job-Shop-Package.git
+                gpu: Quadro RTX 6000
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Turing
+                      cudaCores: 4608
+                      memoryTotal: "25769803776"
+                      name: Quadro RTX 6000
+                      uuid: GPU-56f43da4-1deb-c532-3a59-75303aabf3d2
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-41575f01-33f8-a380-7e12-d3927e3fc83c
+                host: ubuntu-ProLiant-DL380-Gen10
+                memory:
+                    total: "134792536064"
+                os: Linux-6.11.0-26-generic-x86_64-with-glibc2.39
+                program: /home/r13725046okumo/project/Dynamic-Flexible-Job-Shop-Package/exp_graph_rl.py
+                python: CPython 3.12.11
+                root: result/exp_graph_rl/training_process
+                startedAt: "2025-09-10T09:00:51.161400Z"
+                writerId: 1ur268olf2bcjhl5impppmon9se4ualg
+        m: []
+        python_version: 3.12.11
+        t:
+            "1":
+                - 1
+                - 77
+                - 105
+            "2":
+                - 1
+                - 77
+                - 105
+            "3":
+                - 13
+                - 16
+                - 61
+            "4": 3.12.11
+            "5": 0.21.0
+            "12": 0.21.0
+            "13": linux-x86_64
+clip_ratio:
+    value: 0.2
+episodes_per_epoch:
+    value: 10
+epochs:
+    value: 4000
+gae_lambda:
+    value: 0.95
+gamma:
+    value: 0.99
+hidden_dim:
+    value: 128
+num_hgt_layers:
+    value: 3
+pi_lr:
+    value: 0.0003
+train_per_episode:
+    value: 2

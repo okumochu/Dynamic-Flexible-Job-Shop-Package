@@ -35,7 +35,13 @@ def run_hierarchical_rl_experiment():
     config.setup_wandb_env(result_dir, exp_config['wandb_project'])
     
     print("Creating data handler and hierarchical environment...")
-    data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
+    data_handler = FlexibleJobShopDataHandler(
+        data_source=simulation_params, 
+        data_type="simulation",
+        TF=simulation_params['TF'],
+        RDD=simulation_params['RDD'],
+        seed=simulation_params['seed']
+    )
     env = RLEnv(data_handler, alpha=hrl_params['alpha'], use_reward_shaping=hrl_params['use_reward_shaping'])
     
     print(f"Hierarchical environment created: {env.num_jobs} jobs, {env.num_machines} machines")

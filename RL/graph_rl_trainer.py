@@ -51,8 +51,7 @@ class GraphPPOTrainer:
                  hidden_dim: int = None,
                  num_hgt_layers: int = None,
                  num_heads: int = None,
-                 pi_lr: float = None,
-                 v_lr: float = None,
+                 lr: float = None,
                  gamma: float = None,
                  gae_lambda: float = None,
                  clip_ratio: float = None,
@@ -78,8 +77,7 @@ class GraphPPOTrainer:
         hidden_dim = hidden_dim if hidden_dim is not None else rl_params['hidden_dim']
         num_hgt_layers = num_hgt_layers if num_hgt_layers is not None else rl_params['num_hgt_layers']
         num_heads = num_heads if num_heads is not None else rl_params['num_heads']
-        pi_lr = pi_lr if pi_lr is not None else rl_params['pi_lr']
-        v_lr = v_lr if v_lr is not None else rl_params['v_lr']
+        lr = lr if lr is not None else rl_params['lr']
         gamma = gamma if gamma is not None else rl_params['gamma']
         gae_lambda = gae_lambda if gae_lambda is not None else rl_params['gae_lambda']
         clip_ratio = clip_ratio if clip_ratio is not None else rl_params['clip_ratio']
@@ -127,7 +125,8 @@ class GraphPPOTrainer:
                 torch.cuda.manual_seed_all(seed)
         
         # Initialize environment with config parameters
-        self.env = GraphRlEnv(problem_data, alpha=rl_params['alpha'])
+        # Pass trainer device into environment/graph state to keep all tensors aligned
+        self.env = GraphRlEnv(problem_data, alpha=rl_params['alpha'], device=str(self.device))
         print(f"Environment: {self.env.problem_data.num_jobs} jobs, "
               f"{self.env.problem_data.num_machines} machines, "
               f"{self.env.problem_data.num_operations} operations")
@@ -158,7 +157,7 @@ class GraphPPOTrainer:
         print(f"Policy network parameters: {sum(p.numel() for p in self.policy.parameters()):,}")
         
         # Initialize optimizer with better defaults
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=pi_lr, eps=1e-5)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr, eps=1e-5)
         
         # Initialize buffer - better size estimation based on problem complexity
         estimated_steps_per_episode = min(self.env.problem_data.num_operations * 3, 1000)  # Cap for large problems
@@ -203,7 +202,7 @@ class GraphPPOTrainer:
         print(f"  Multi-objective weight: {alpha} ({'makespan-only' if alpha == 0.0 else 'tardiness-only' if alpha == 1.0 else 'balanced'})")
         print(f"  Temporal encoding: {temporal_dim}D, max_freq={max_temporal_freq}")
         print(f"  Dropout: {rl_params['dropout']}")
-        print(f"  Learning rate: {rl_params['pi_lr']}")
+        print(f"  Learning rate: {rl_params['lr']}")
         print(f"  Simplified PPO: No entropy regularization or KL divergence (due to variable action spaces)")
     
     def collect_rollout(self, buffer: GraphPPOBuffer, epoch: int) -> Dict:
@@ -247,13 +246,8 @@ class GraphPPOTrainer:
                     
                     # Direct mapping from action index to environment action
                     target_pair = env_valid_actions[action_idx.item()]
-                    
-                    # Find corresponding environment action
-                    env_action = None
-                    for env_action_idx, pair in self.env.action_to_pair_map.items():
-                        if pair == target_pair:
-                            env_action = env_action_idx
-                            break
+                    # Use O(1) reverse map
+                    env_action = self.env.pair_to_action_map.get(tuple(target_pair))
                 
                 # Step environment
                 next_obs, reward, terminated, truncated, info = self.env.step(env_action)
@@ -460,7 +454,7 @@ class GraphPPOTrainer:
                     "epochs": self.epochs,
                     "episodes_per_epoch": self.episodes_per_epoch,
                     "train_per_episode": self.train_per_episode,
-                    "pi_lr": self.optimizer.param_groups[0]['lr'],
+                    "lr": self.optimizer.param_groups[0]['lr'],
                     "gamma": self.gamma,
                     "gae_lambda": self.gae_lambda,
                     "clip_ratio": self.clip_ratio,
@@ -530,9 +524,8 @@ class GraphPPOTrainer:
             if WANDB_AVAILABLE:
                 wandb.log(wandb_log, step=epoch)
 
-            # Clear buffer only when it's getting full to improve sample efficiency
-            if self.buffer.size >= self.buffer.buffer_size * 0.8:
-                self.buffer.clear()
+            # Clear buffer unconditionally after each epoch's update phase
+            self.buffer.clear()
             
             # Progress monitoring
             if (epoch + 1) % 10 == 0:
@@ -674,7 +667,7 @@ def main():
         hidden_dim=args.hidden_dim,
         num_hgt_layers=args.num_hgt_layers,
         num_heads=args.num_heads,
-        pi_lr=args.learning_rate,  # Fixed parameter name
+        lr=args.learning_rate,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         clip_ratio=args.clip_ratio,

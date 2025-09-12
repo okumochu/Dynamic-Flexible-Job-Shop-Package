@@ -17,7 +17,7 @@ class GraphRlEnv(gym.Env):
     and machines are nodes with different features, connected by various edge types.
     """
     
-    def __init__(self, problem_data: FlexibleJobShopDataHandler, max_episode_steps: Optional[int] = None, alpha: float = 0.0):
+    def __init__(self, problem_data: FlexibleJobShopDataHandler, max_episode_steps: Optional[int] = None, alpha: float = 0.0, device: Optional[str] = None):
         """
         Initialize the FJSP Graph RL Environment.
         
@@ -32,7 +32,7 @@ class GraphRlEnv(gym.Env):
         super().__init__()
         
         self.problem_data = problem_data
-        self.graph_state = GraphState(problem_data)
+        self.graph_state = GraphState(problem_data, device=device)
         self.alpha = alpha  # Multi-objective weight parameter
         
         # Due date information for tardiness calculation
@@ -48,6 +48,8 @@ class GraphRlEnv(gym.Env):
         # Action space: discrete actions representing (operation, machine) pairs
         # We'll create a mapping from action index to (op_idx, machine_idx) pairs
         self.action_to_pair_map = self._build_action_mapping()
+        # Reverse mapping for O(1) lookup from (op, machine) to action index
+        self.pair_to_action_map = {pair: idx for idx, pair in self.action_to_pair_map.items()}
         self.action_space = spaces.Discrete(len(self.action_to_pair_map))
         
         # Observation space: We can't easily define the exact structure of HeteroData
@@ -147,14 +149,13 @@ class GraphRlEnv(gym.Env):
         
         # Store previous state for reward calculation
         prev_makespan = self.graph_state.get_makespan()
-        prev_scheduled_ops = np.sum(self.graph_state.operation_status == 1)
         
         # Execute the action
         self.graph_state.update_state(op_idx, machine_idx)
         self.current_step += 1
         
         # Calculate reward (multi-objective: makespan + tardiness)
-        reward = self._calculate_reward(prev_makespan, prev_scheduled_ops)
+        reward = self._calculate_reward(prev_makespan)
         
         # Check terminal conditions
         terminated = self.graph_state.is_done()
@@ -176,13 +177,12 @@ class GraphRlEnv(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
-    def _calculate_reward(self, prev_makespan: float, prev_scheduled_ops: int) -> float:
+    def _calculate_reward(self, prev_makespan: float) -> float:
         """
         Calculate multi-objective reward combining makespan and tardiness minimization.
         
         Args:
             prev_makespan: Makespan before the action
-            prev_scheduled_ops: Number of scheduled operations before the action
             
         Returns:
             Reward value combining makespan and tardiness objectives
@@ -199,15 +199,10 @@ class GraphRlEnv(gym.Env):
         # Update last tardiness for next step
         self.last_total_weighted_tardiness = current_twt
         
-        # Multi-objective combination
-        if self.graph_state.is_done():
-            # Final completion reward (negative values as both objectives are minimization)
-            final_objective = (1 - self.alpha) * current_makespan + self.alpha * current_twt
-            return -final_objective
-        else:
-            # Dense reward during episode
-            combined_reward = (1 - self.alpha) * makespan_reward + self.alpha * tardiness_reward
-            return combined_reward
+        # ALWAYS return the combined dense reward.
+        # The telescoping sum property ensures the agent optimizes the final objective.
+        combined_reward = (1 - self.alpha) * makespan_reward + self.alpha * tardiness_reward
+        return combined_reward
     
     def _calculate_total_weighted_tardiness(self) -> float:
         """

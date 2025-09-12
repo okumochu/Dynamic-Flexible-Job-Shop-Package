@@ -91,12 +91,7 @@ def evaluate_graph_policy(model_path: str, env: GraphRlEnv, num_episodes: int = 
                 # Convert to environment action
                 if action_idx < len(valid_pairs):
                     target_pair = valid_pairs[action_idx]
-                    env_action = None
-                    for env_action_idx, pair in env.action_to_pair_map.items():
-                        if pair == target_pair:
-                            env_action = env_action_idx
-                            break
-                    
+                    env_action = env.pair_to_action_map.get(tuple(target_pair))
                     if env_action is None:
                         print(f"Warning: Could not find environment action for pair {target_pair}")
                         break
@@ -115,10 +110,9 @@ def evaluate_graph_policy(model_path: str, env: GraphRlEnv, num_episodes: int = 
         
         # Extract final metrics
         final_makespan = env.graph_state.get_makespan()
-        
-        # For single objective optimization: objective = makespan
-        total_twt = 0.0  # Not used for makespan-only optimization
-        objective = final_makespan
+        total_twt = env._calculate_total_weighted_tardiness()
+        alpha = env.alpha
+        objective = (1 - alpha) * final_makespan + alpha * total_twt
         
         episode_rewards.append(episode_reward)
         episode_makespans.append(final_makespan)
@@ -239,8 +233,14 @@ def run_single_graph_rl_experiment():
     config.setup_wandb_env(result_dir, exp_config['wandb_project'])
     
     print("Creating data handler and graph environment...")
-    data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
-    env = GraphRlEnv(data_handler, alpha=rl_params['alpha'])
+    data_handler = FlexibleJobShopDataHandler(
+        data_source=simulation_params, 
+        data_type="simulation",
+        TF=simulation_params['TF'],
+        RDD=simulation_params['RDD'],
+        seed=simulation_params['seed']
+    )
+    env = GraphRlEnv(data_handler, alpha=rl_params['alpha'], device=rl_params['device'])
     
     print(f"Graph environment created: {env.problem_data.num_jobs} jobs, {env.problem_data.num_machines} machines")
     print(f"Total operations: {env.problem_data.num_operations}")
@@ -256,8 +256,7 @@ def run_single_graph_rl_experiment():
         hidden_dim=rl_params['hidden_dim'],
         num_hgt_layers=rl_params['num_hgt_layers'],
         num_heads=rl_params['num_heads'],
-        pi_lr=rl_params['pi_lr'],
-        v_lr=rl_params['v_lr'],
+        lr=rl_params['lr'],
         gamma=rl_params['gamma'],
         gae_lambda=rl_params['gae_lambda'],
         clip_ratio=rl_params['clip_ratio'],
@@ -322,11 +321,7 @@ def run_single_graph_rl_experiment():
             action_idx = torch.argmax(action_logits).item()
             if action_idx < len(valid_pairs):
                 target_pair = valid_pairs[action_idx]
-                env_action = None
-                for env_action_idx, pair in env.action_to_pair_map.items():
-                    if pair == target_pair:
-                        env_action = env_action_idx
-                        break
+                env_action = env.pair_to_action_map.get(tuple(target_pair))
                 if env_action is None:
                     break
             else:
@@ -362,7 +357,7 @@ def run_single_graph_rl_experiment():
     print(f"  Hidden Dimension: {rl_params['hidden_dim']}")
     print(f"  HGT Layers: {rl_params['num_hgt_layers']}")
     print(f"  Attention Heads: {rl_params['num_heads']}")
-    print(f"  Learning Rate: {rl_params['pi_lr']}")
+    print(f"  Learning Rate: {rl_params['lr']}")
     print(f"  Device: {rl_params['device']}")
     print(f"  Training Time: {training_time:.2f} seconds")
     
@@ -422,7 +417,7 @@ def run_brandimarte_graph_rl_experiment():
                   f"Operations: {data_handler.num_operations}")
             
             # Create environment
-            env = GraphRlEnv(data_handler, alpha=rl_params['alpha'])
+            env = GraphRlEnv(data_handler, alpha=rl_params['alpha'], device=rl_params['device'])
             
             # Adjust training parameters for dataset size (reduce epochs for larger datasets)
             adjusted_epochs = min(rl_params['epochs'], max(100, 1000 // (data_handler.num_operations // 10)))
@@ -436,7 +431,7 @@ def run_brandimarte_graph_rl_experiment():
                 hidden_dim=rl_params['hidden_dim'],
                 num_hgt_layers=rl_params['num_hgt_layers'],
                 num_heads=rl_params['num_heads'],
-                pi_lr=rl_params['pi_lr'],
+                lr=rl_params['lr'],
                 gamma=rl_params['gamma'],
                 gae_lambda=rl_params['gae_lambda'],
                 clip_ratio=rl_params['clip_ratio'],

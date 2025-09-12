@@ -28,7 +28,13 @@ def run_flat_rl_experiment():
     config.setup_wandb_env(result_dir, exp_config['wandb_project'])
     
     print("Creating data handler and environment...")
-    data_handler = FlexibleJobShopDataHandler(data_source=simulation_params, data_type="simulation")
+    data_handler = FlexibleJobShopDataHandler(
+        data_source=simulation_params, 
+        data_type="simulation",
+        TF=simulation_params['TF'],
+        RDD=simulation_params['RDD'],
+        seed=simulation_params['seed']
+    )
     env = RLEnv(data_handler, alpha=rl_params['alpha'], use_reward_shaping=rl_params['use_reward_shaping'])
     
     print(f"Environment created: {env.num_jobs} jobs, {env.num_machines} machines")

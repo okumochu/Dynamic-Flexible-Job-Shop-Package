@@ -101,7 +101,13 @@ class BenchmarkEvaluator:
             'compatible_machines_lb': 1, 'compatible_machines_ub': 2,
             'TF': 0.4, 'RDD': 0.8, 'seed': 42
         }
-        dummy_data = FlexibleJobShopDataHandler(dummy_params, 'simulation')
+        dummy_data = FlexibleJobShopDataHandler(
+            data_source=dummy_params, 
+            data_type='simulation',
+            TF=dummy_params['TF'],
+            RDD=dummy_params['RDD'],
+            seed=dummy_params['seed']
+        )
         
         # Use config for trainer parameters (GraphPPOTrainer will use config defaults when None is passed)
         self.trainer = GraphPPOTrainer(
@@ -197,10 +203,9 @@ class BenchmarkEvaluator:
                 # Extract final metrics
                 is_valid_completion = env.graph_state.is_done()
                 final_makespan = env.graph_state.get_makespan() if is_valid_completion else float('inf')
-                
-                # For single objective optimization: objective = makespan
-                total_twt = 0.0  # Not used for makespan-only optimization
-                objective = final_makespan
+                total_twt = env._calculate_total_weighted_tardiness() if is_valid_completion else float('inf')
+                alpha = env.alpha
+                objective = (1 - alpha) * final_makespan + alpha * total_twt if is_valid_completion else float('inf')
                 
                 episode_makespans.append(final_makespan)
                 episode_objectives.append(objective)

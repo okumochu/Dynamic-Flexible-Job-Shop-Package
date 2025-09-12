@@ -13,7 +13,7 @@ class GraphState:
     and handles dynamic state updates during scheduling.
     """
     
-    def __init__(self, problem_data: FlexibleJobShopDataHandler):
+    def __init__(self, problem_data: FlexibleJobShopDataHandler, device: Optional[str] = None):
         """
         Initialize the graph state from FJSP problem data.
         
@@ -42,7 +42,10 @@ class GraphState:
         self.last_op_on_machine: Dict[int, Optional[int]] = {m_id: None for m_id in range(self.num_machines)}
         
         # PERFORMANCE OPTIMIZATION: Store device explicitly to avoid repeated queries
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if device is None or device == 'auto':
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
         
         # PERFORMANCE OPTIMIZATION: Batch edge updates instead of incremental torch.cat
         self.pending_machine_precedes_edges = []  # List of (src, dst, attr) tuples

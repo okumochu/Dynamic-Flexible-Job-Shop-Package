@@ -29,16 +29,16 @@ class ExperimentConfig:
         # Common RL parameters (shared by all RL methods)
         self.common_rl_params = {
             'alpha': 0,  # TWT weight in objective
-            'gae_lambda': 0.95,
+            'gae_lambda': 0.5,
             'clip_ratio': 0.2,
             'entropy_coef': 0.01, # graph RL no use
             'value_coef': 0.5,  # Value loss coefficient for PPO
             'use_reward_shaping': True,  # Whether to use dense rewards
             'test_interval': 10,  # How often to test generalization (in epochs)
-            'device': 'auto',  # Device for training ('auto', 'cpu', 'cuda', etc.)
+            'device': "auto",  # Device for training ('auto', 'cpu', 'cuda', etc.)
             'test_envs': 30,  # Number of test environments for generalization runs
             'episodes_per_epoch': 2,  # Number of episodes to collect per epoch
-            'epochs': 2000,  # Very quick training run for Gantt chart generation
+            'epochs': 4000,  # Very quick training run for Gantt chart generation
             'train_per_episode': 2,  # Number of training iterations per episode
             'target_kl': 0.01, # graph RL no use
             'max_grad_norm': 0.5,
@@ -48,8 +48,7 @@ class ExperimentConfig:
         # Flat RL specific parameters
         self.flat_rl_params = {
             'gamma': 0.99,  # Discount factor for flat RL
-            'pi_lr': 3e-4,  # Policy learning rate
-            'v_lr': 3e-4,   # Value function learning rate
+            'lr': 3e-4,  # Unified learning rate
         }
         
         # Hierarchical RL specific parameters
@@ -68,7 +67,7 @@ class ExperimentConfig:
         self.graph_rl_params = {
             # Network Architecture
             'hidden_dim': 128,  # Hidden dimension for graph networks (must be divisible by num_heads)
-            'num_hgt_layers': 4,  # Number of HGT layers
+            'num_hgt_layers': 2,  # Number of HGT layers
             'num_heads': 4,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
             'dropout': 0.1,  # Dropout rate for graph networks
             
@@ -77,9 +76,8 @@ class ExperimentConfig:
             'max_temporal_freq': 1000.0,  # Maximum frequency for sinusoidal temporal encoding
             
             # Learning Parameters
-            'pi_lr': 3e-4,  # Policy learning rate for graph RL
-            'v_lr': 3e-4,   # Value function learning rate for graph RL
-            'gamma': 1,  # Discount factor for graph RL
+            'lr': 3e-4,  # Unified learning rate for graph RL
+            'gamma': 0.999,  # Discount factor for graph RL
             
             # Multi-Objective Optimization
             'alpha': 0.5,  # Multi-objective weight: 0.0=pure makespan, 1.0=pure tardiness, 0.5=balanced

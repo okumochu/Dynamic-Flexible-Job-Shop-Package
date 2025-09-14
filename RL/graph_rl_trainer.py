@@ -133,8 +133,7 @@ class GraphPPOTrainer:
         print(f"Multi-objective weight (alpha): {rl_params['alpha']}")
 
         # Get feature dimensions from GraphState (not from observation)
-        from RL.graph_state import GraphState
-        op_feature_dim, machine_feature_dim, job_feature_dim = GraphState.get_feature_dimensions()
+        op_feature_dim, machine_feature_dim, job_feature_dim = self.env.graph_state.get_feature_dimensions()
         
         print(f"Feature dimensions - Operations: {op_feature_dim}, Machines: {machine_feature_dim}, Jobs: {job_feature_dim}")
         
@@ -149,9 +148,7 @@ class GraphPPOTrainer:
             hidden_dim=hidden_dim,
             num_hgt_layers=num_hgt_layers,
             num_heads=num_heads,
-            dropout=rl_params['dropout'],
-            temporal_dim=rl_params['temporal_dim'],
-            max_temporal_freq=rl_params['max_temporal_freq']
+            dropout=rl_params['dropout']
         ).to(self.device)
         
         print(f"Policy network parameters: {sum(p.numel() for p in self.policy.parameters()):,}")
@@ -187,20 +184,11 @@ class GraphPPOTrainer:
             raise ValueError(f"Alpha parameter ({alpha}) must be between 0.0 and 1.0. "
                            f"0.0=pure makespan, 1.0=pure tardiness, 0.5=balanced")
         
-        # Validate temporal encoding parameters
-        temporal_dim = rl_params['temporal_dim']
-        if temporal_dim <= 0 or temporal_dim % 2 != 0:
-            raise ValueError(f"temporal_dim ({temporal_dim}) must be positive and even for sinusoidal encoding")
-        
-        max_temporal_freq = rl_params['max_temporal_freq']
-        if max_temporal_freq <= 0:
-            raise ValueError(f"max_temporal_freq ({max_temporal_freq}) must be positive")
-        
         # Log configuration for verification
         print(f"✓ Configuration validated:")
         print(f"  Hidden dim: {hidden_dim} (divisible by {num_heads} heads)")
         print(f"  Multi-objective weight: {alpha} ({'makespan-only' if alpha == 0.0 else 'tardiness-only' if alpha == 1.0 else 'balanced'})")
-        print(f"  Temporal encoding: {temporal_dim}D, max_freq={max_temporal_freq}")
+        print(f"  Temporal encoding: DISABLED")
         print(f"  Dropout: {rl_params['dropout']}")
         print(f"  Learning rate: {rl_params['lr']}")
         print(f"  Simplified PPO: No entropy regularization or KL divergence (due to variable action spaces)")
@@ -237,7 +225,7 @@ class GraphPPOTrainer:
                 
                 # Get action from policy - always produces valid action logits
                 with torch.no_grad():
-                    action_logits, value, _, policy_valid_pairs = self.policy(obs, env_valid_actions)
+                    action_logits, value = self.policy(obs, env_valid_actions)
                     
                     # Create distribution and sample action
                     dist = Categorical(logits=action_logits)
@@ -371,7 +359,7 @@ class GraphPPOTrainer:
                 batch_graphs = Batch.from_data_list([obs.to(self.device) for obs in mini_batch_obs])
                 
                 # Batched forward pass through the policy network
-                batch_action_logits, batch_values = self.policy.forward_batch(batch_graphs, mini_batch_valid_pairs)
+                batch_action_logits, batch_values = self.policy.forward(batch_graphs, mini_batch_valid_pairs)
                 
                 # Process results for each graph in the batch
                 policy_losses = []

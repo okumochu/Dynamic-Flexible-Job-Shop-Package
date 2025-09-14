@@ -13,7 +13,7 @@ class GraphState:
     and handles dynamic state updates during scheduling.
     """
     
-    def __init__(self, problem_data: FlexibleJobShopDataHandler, device: Optional[str] = None):
+    def __init__(self, problem_data: FlexibleJobShopDataHandler, device: str):
         """
         Initialize the graph state from FJSP problem data.
         
@@ -26,11 +26,9 @@ class GraphState:
         self.num_jobs = problem_data.num_jobs
         
         # Track current state
-        self.current_time = 0
         self.operation_status = np.zeros(self.num_operations, dtype=int)  # 0: unscheduled, 1: scheduled
         self.operation_completion_times = np.zeros(self.num_operations, dtype=float)
         self.machine_available_times = np.zeros(self.num_machines, dtype=float)
-        self.machine_workloads = np.zeros(self.num_machines, dtype=float)
         
         # Track which operations are ready to be scheduled (not yet scheduled and predecessors done)
         self.ready_operations = set()
@@ -41,14 +39,13 @@ class GraphState:
         # Track the last operation scheduled on each machine (for disjunctive arcs)
         self.last_op_on_machine: Dict[int, Optional[int]] = {m_id: None for m_id in range(self.num_machines)}
         
-        # PERFORMANCE OPTIMIZATION: Store device explicitly to avoid repeated queries
-        if device is None or device == 'auto':
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = torch.device(device)
+        # Set device
+        self.device = device
         
-        # PERFORMANCE OPTIMIZATION: Batch edge updates instead of incremental torch.cat
-        self.pending_machine_precedes_edges = []  # List of (src, dst, attr) tuples
+        # Feature dimensions - will be set when features are built
+        self.job_feature_dim = None
+        self.op_feature_dim = None
+        self.machine_feature_dim = None
         
         # Build the heterogeneous graph
         self.hetero_data = self._build_initial_graph()
@@ -67,38 +64,36 @@ class GraphState:
         """
         data = HeteroData()
         
-        # Build job nodes and features (NEW: hierarchical structure)
+        # Build job nodes and features
         job_features = self._build_job_features()
         data['job'].x = torch.tensor(job_features, dtype=torch.float32, device=self.device)
         
-        # Build operation nodes and features (MODIFIED: simplified, job-level info moved to job nodes)
+        # Build operation nodes and features
         op_features = self._build_operation_features()
         data['op'].x = torch.tensor(op_features, dtype=torch.float32, device=self.device)
         
-        # Build machine nodes and features (UNCHANGED: machine-level information)
+        # Build machine nodes and features
         machine_features = self._build_machine_features()
         data['machine'].x = torch.tensor(machine_features, dtype=torch.float32, device=self.device)
         
-        # Build edges (EXTENDED: includes job-operation hierarchy)
+        # Build edges
         self._build_edges(data)
         
         return data
     
     def _build_job_features(self) -> np.ndarray:
         """
-        Build initial job node features (NEW: hierarchical structure).
+        Build initial job node features
         
         Returns:
-            Array of shape (num_jobs, 7) with normalized features:
-            [due_date, num_total_ops, total_workload_estimate, priority_weight,
-             num_remaining_ops, remaining_workload, job_status]
+            Array of shape (num_jobs, 4) with normalized features:
+            [due_date, num_total_ops, priority_weight, num_remaining_ops]
         """
-        features = np.zeros((self.num_jobs, 7))
+        features = np.zeros((self.num_jobs, 4))
         
         # Get normalization factors
         max_due_date = self.problem_data.get_max_due_date()
         max_ops_per_job = max(len(self.problem_data.get_job_operations(job_id)) for job_id in range(self.num_jobs))
-        max_proc_time = self.problem_data.get_max_processing_time()
         due_dates = self.problem_data.get_jobs_due_date()
         weights = self.problem_data.get_jobs_weight()
         max_weight = max(weights) if weights else 1.0
@@ -109,70 +104,42 @@ class GraphState:
             # Static features
             features[job_id, 0] = due_dates[job_id] / max_due_date  # due_date (normalized)
             features[job_id, 1] = len(job_operations) / max_ops_per_job  # num_total_ops (normalized)
-            
-            # Calculate total workload estimate (minimum processing time sum)
-            total_workload = sum(min(op.get_processing_time(m_id) for m_id in op.compatible_machines) 
-                               for op in job_operations)
-            features[job_id, 2] = total_workload / (max_proc_time * max_ops_per_job)  # total_workload_estimate (normalized)
-            
-            features[job_id, 3] = weights[job_id] / max_weight  # priority_weight (normalized)
+            features[job_id, 2] = weights[job_id] / max_weight  # priority_weight (normalized)
             
             # Dynamic features (will be updated during episode)
             remaining_ops = sum(1 for op in job_operations if self.operation_status[op.operation_id] == 0)
-            features[job_id, 4] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
-            
-            # Remaining workload (estimated)
-            remaining_workload = sum(min(op.get_processing_time(m_id) for m_id in op.compatible_machines) 
-                                   for op in job_operations if self.operation_status[op.operation_id] == 0)
-            features[job_id, 5] = remaining_workload / (max_proc_time * max_ops_per_job)  # remaining_workload (normalized)
-            
-            # Job status: 0=not started, 1=in progress, 2=completed
-            if all(self.operation_status[op.operation_id] == 1 for op in job_operations):
-                job_status = 2  # completed
-            elif any(self.operation_status[op.operation_id] == 1 for op in job_operations):
-                job_status = 1  # in progress
-            else:
-                job_status = 0  # not started
-            features[job_id, 6] = job_status / 2.0  # job_status (normalized)
+            features[job_id, 3] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
+        
+        # Set feature dimension dynamically
+        self.job_feature_dim = features.shape[1]
             
         return features
     
-    @classmethod
-    def get_feature_dimensions(cls) -> tuple[int, int, int]:
+    def get_feature_dimensions(self) -> tuple[int, int, int]:
         """
         Get the feature dimensions for each node type.
         
         Returns:
             Tuple of (op_feature_dim, machine_feature_dim, job_feature_dim)
         """
-        OP_FEATURE_DIM = 8  # [proc_time_mean, proc_time_std, proc_time_min, proc_time_max, 
-                           #  status, completion_time, earliest_start_time, num_compatible_machines]
-        
-        MACHINE_FEATURE_DIM = 7  # [available_time, total_workload, num_compatible_ready_ops,
-                                #  ready_ops_proc_time_mean, ready_ops_proc_time_min, 
-                                #  ready_ops_proc_time_max, ready_ops_proc_time_std]
-                                
-        JOB_FEATURE_DIM = 7  # [due_date, num_total_ops, total_workload_estimate, priority_weight,
-                            #  num_remaining_ops, remaining_workload, job_status]
-                            
-        return OP_FEATURE_DIM, MACHINE_FEATURE_DIM, JOB_FEATURE_DIM
+        return self.op_feature_dim, self.machine_feature_dim, self.job_feature_dim
     
     def _build_operation_features(self) -> np.ndarray:
         """
         Build initial operation node features (SIMPLIFIED: job-level info moved to job nodes).
         
         Returns:
-            Array of shape (num_operations, 8) with normalized features:
+            Array of shape (num_operations, 9) with normalized features:
             [proc_time_mean, proc_time_std, proc_time_min, proc_time_max, 
-             status, completion_time, earliest_start_time, num_compatible_machines]
+             status, start_time, completion_time, earliest_start_time, num_compatible_machines]
              
         Note: job_progress removed - now available through job nodes via graph edges
         """
-        features = np.zeros((self.num_operations, 8))
+        features = np.zeros((self.num_operations, 9))
         
         # Get global normalization factors
         max_proc_time = self.problem_data.get_max_processing_time()
-        max_due_date = self.problem_data.get_max_due_date()
+        current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
         for op_id in range(self.num_operations):
             operation = self.problem_data.get_operation(op_id)
@@ -187,11 +154,23 @@ class GraphState:
             
             # Dynamic features (will be updated)
             features[op_id, 4] = self.operation_status[op_id]  # status (0: unscheduled, 1: scheduled)
-            features[op_id, 5] = self.operation_completion_times[op_id] / max_due_date  # completion_time  
-            features[op_id, 6] = self._get_earliest_start_time(op_id) / max_due_date  # earliest_start_time
+            
+            # Start time and completion time (normalized by current makespan, 0 if not scheduled)
+            if self.operation_status[op_id] == 1:  # scheduled
+                start_time = self.operation_completion_times[op_id] - operation.get_processing_time(self.operation_machine_assignments[op_id])
+                features[op_id, 5] = start_time / current_makespan  # start_time
+                features[op_id, 6] = self.operation_completion_times[op_id] / current_makespan  # completion_time
+            else:  # not scheduled
+                features[op_id, 5] = 0.0  # start_time
+                features[op_id, 6] = 0.0  # completion_time
+            
+            features[op_id, 7] = self._get_earliest_start_time(op_id) / current_makespan  # earliest_start_time
             
             # Compatibility features
-            features[op_id, 7] = len(compatible_machines) / self.num_machines  # num_compatible_machines (normalized)
+            features[op_id, 8] = len(compatible_machines) / self.num_machines  # num_compatible_machines (normalized)
+        
+        # Set feature dimension dynamically
+        self.op_feature_dim = features.shape[1]
             
         return features
     
@@ -200,24 +179,21 @@ class GraphState:
         Build initial machine node features.
         
         Returns:
-            Array of shape (num_machines, 7) with normalized features:
-            [available_time, total_workload, num_compatible_ready_ops,
-             ready_ops_proc_time_mean, ready_ops_proc_time_min, 
+            Array of shape (num_machines, 6) with normalized features:
+            [available_time, num_compatible_ready_ops,
+             ready_ops_proc_time_mean, ready_ops_proc_time_min,
              ready_ops_proc_time_max, ready_ops_proc_time_std]
         """
-        features = np.zeros((self.num_machines, 7))
+        features = np.zeros((self.num_machines, 6))
         
         # Get normalization factors
-        max_due_date = self.problem_data.get_max_due_date()
-        max_workload = sum(self.problem_data.get_machine_load(m_id) for m_id in range(self.num_machines))
-        max_workload = max(max_workload, 1.0)  # Avoid division by zero
+        current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
         # Get max processing time for normalization
         max_proc_time = self.problem_data.get_max_processing_time()
         
         for m_id in range(self.num_machines):
-            features[m_id, 0] = self.machine_available_times[m_id] / max_due_date      # available_time
-            features[m_id, 1] = self.machine_workloads[m_id] / max_workload           # total_workload
+            features[m_id, 0] = self.machine_available_times[m_id] / current_makespan  # available_time
             
             # Calculate statistics for ready operations that can be processed by this machine
             ready_proc_times = []
@@ -229,91 +205,120 @@ class GraphState:
             
             # Set processing time statistics features
             if ready_proc_times:
-                features[m_id, 2] = len(ready_proc_times) / max(len(self.ready_operations), 1)  # num_compatible_ready_ops (normalized)
-                features[m_id, 3] = np.mean(ready_proc_times) / max_proc_time  # ready_ops_proc_time_mean
-                features[m_id, 4] = np.min(ready_proc_times) / max_proc_time   # ready_ops_proc_time_min
-                features[m_id, 5] = np.max(ready_proc_times) / max_proc_time   # ready_ops_proc_time_max
-                features[m_id, 6] = np.std(ready_proc_times) / max_proc_time   # ready_ops_proc_time_std
+                features[m_id, 1] = len(ready_proc_times) / max(len(self.ready_operations), 1)  # num_compatible_ready_ops (normalized)
+                features[m_id, 2] = np.mean(ready_proc_times) / max_proc_time  # ready_ops_proc_time_mean
+                features[m_id, 3] = np.min(ready_proc_times) / max_proc_time   # ready_ops_proc_time_min
+                features[m_id, 4] = np.max(ready_proc_times) / max_proc_time   # ready_ops_proc_time_max
+                features[m_id, 5] = np.std(ready_proc_times) / max_proc_time   # ready_ops_proc_time_std
             else:
                 # No compatible ready operations
-                features[m_id, 2] = 0.0  # num_compatible_ready_ops
-                features[m_id, 3] = 0.0  # ready_ops_proc_time_mean
-                features[m_id, 4] = 0.0  # ready_ops_proc_time_min  
-                features[m_id, 5] = 0.0  # ready_ops_proc_time_max
-                features[m_id, 6] = 0.0  # ready_ops_proc_time_std
+                features[m_id, 1] = 0.0  # num_compatible_ready_ops
+                features[m_id, 2] = 0.0  # ready_ops_proc_time_mean
+                features[m_id, 3] = 0.0  # ready_ops_proc_time_min  
+                features[m_id, 4] = 0.0  # ready_ops_proc_time_max
+                features[m_id, 5] = 0.0  # ready_ops_proc_time_std
+        
+        # Set feature dimension dynamically
+        self.machine_feature_dim = features.shape[1]
             
         return features
     
     def _build_edges(self, data: HeteroData):
-        """Build all edge types in the heterogeneous graph (EXTENDED: includes job hierarchy)."""
+        """Build all edge types in the heterogeneous graph"""
         
-        # 1. Job-operation hierarchy edges (NEW: hierarchical structure)
-        job_op_edges, op_job_edges = self._get_job_operation_edges()
-        if len(job_op_edges) > 0:
-            data['job', 'contains', 'op'].edge_index = torch.tensor(job_op_edges, dtype=torch.long, device=self.device).t()
-        if len(op_job_edges) > 0:
-            data['op', 'belongs_to', 'job'].edge_index = torch.tensor(op_job_edges, dtype=torch.long, device=self.device).t()
+        # 1. Job-operation hierarchy edges
+        job_sources, op_targets, op_sources, job_targets = self._get_job_operation_edges()
+        if len(job_sources) > 0:
+            data['job', 'contains', 'op'].edge_index = torch.tensor([job_sources, op_targets], dtype=torch.long, device=self.device)
+        if len(op_sources) > 0:
+            data['op', 'belongs_to', 'job'].edge_index = torch.tensor([op_sources, job_targets], dtype=torch.long, device=self.device)
         
         # 2. Operation precedence edges ('op', 'precedes', 'op')
-        precedence_edges = self._get_precedence_edges()
-        if len(precedence_edges) > 0:
-            data['op', 'precedes', 'op'].edge_index = torch.tensor(precedence_edges, dtype=torch.long, device=self.device).t()
+        precedence_sources, precedence_targets = self._get_precedence_edges()
+        if len(precedence_sources) > 0:
+            data['op', 'precedes', 'op'].edge_index = torch.tensor([precedence_sources, precedence_targets], dtype=torch.long, device=self.device)
         
         # 3. Operation-machine compatibility edges ('op', 'on_machine', 'machine') 
         # and ('machine', 'can_process', 'op')
-        op_machine_edges, machine_op_edges = self._get_operation_machine_edges()
+        op_sources, machine_targets, machine_sources, op_targets = self._get_operation_machine_edges()
         
-        if len(op_machine_edges) > 0:
-            data['op', 'on_machine', 'machine'].edge_index = torch.tensor(op_machine_edges, dtype=torch.long, device=self.device).t()
-        if len(machine_op_edges) > 0:
-            data['machine', 'can_process', 'op'].edge_index = torch.tensor(machine_op_edges, dtype=torch.long, device=self.device).t()
+        if len(op_sources) > 0:
+            data['op', 'on_machine', 'machine'].edge_index = torch.tensor([op_sources, machine_targets], dtype=torch.long, device=self.device)
+        if len(machine_sources) > 0:
+            data['machine', 'can_process', 'op'].edge_index = torch.tensor([machine_sources, op_targets], dtype=torch.long, device=self.device)
+        
+        # 4. Initialize dynamic edge types (empty initially, populated during scheduling)
+        # Machine precedence edges (disjunctive arcs)
+        data['op', 'machine_precedes', 'op'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
+        data['op', 'machine_precedes', 'op'].edge_attr = torch.empty((0, 1), dtype=torch.float32, device=self.device)
+        
+        # Assignment edges (operation -> machine)
+        data['op', 'assigned_to', 'machine'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
+        
+        # Assignment edges (machine -> operation) 
+        data['machine', 'processes', 'op'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
     
-    def _get_job_operation_edges(self) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    def _get_job_operation_edges(self) -> Tuple[List[int], List[int], List[int], List[int]]:
         """
-        Get hierarchical edges between jobs and their operations (NEW: job nodes).
+        Get hierarchical edges between jobs and their operations in PyG format
         
         Returns:
-            Tuple of (job_to_op_edges, op_to_job_edges) for bidirectional connectivity
+            Tuple of (job_sources, op_targets, op_sources, job_targets) for bidirectional connectivity
         """
-        job_op_edges = []  # (job_id, op_id) for 'job contains op'
-        op_job_edges = []  # (op_id, job_id) for 'op belongs_to job'
+        job_sources = []  # Source job nodes
+        op_targets = []   # Target operation nodes
+        op_sources = []   # Source operation nodes  
+        job_targets = []  # Target job nodes
         
         for job_id in range(self.num_jobs):
             job_operations = self.problem_data.get_job_operations(job_id)
             for operation in job_operations:
                 op_id = operation.operation_id
-                job_op_edges.append((job_id, op_id))
-                op_job_edges.append((op_id, job_id))
+                # Job -> Operation edges
+                job_sources.append(job_id)
+                op_targets.append(op_id)
+                # Operation -> Job edges
+                op_sources.append(op_id)
+                job_targets.append(job_id)
                 
-        return job_op_edges, op_job_edges
+        return job_sources, op_targets, op_sources, job_targets
     
-    def _get_precedence_edges(self) -> List[Tuple[int, int]]:
-        """Get precedence edges between operations within jobs."""
-        edges = []
+    def _get_precedence_edges(self) -> Tuple[List[int], List[int]]:
+        """Get bidirectional precedence edges between operations within jobs in PyG format."""
+        sources = []
+        targets = []
         
         for job_id in range(self.num_jobs):
             job_operations = self.problem_data.get_job_operations(job_id)
             
-            # Create precedence edges within the job
+            # Create bidirectional precedence edges within the job
             for i in range(len(job_operations) - 1):
                 pred_op_id = job_operations[i].operation_id
                 succ_op_id = job_operations[i + 1].operation_id
-                edges.append((pred_op_id, succ_op_id))
+                # Add both directions for proper message passing
+                sources.extend([pred_op_id, succ_op_id])  # predecessor -> successor, successor -> predecessor
+                targets.extend([succ_op_id, pred_op_id])  # successor -> predecessor, predecessor -> successor
                 
-        return edges
+        return sources, targets
     
-    def _get_operation_machine_edges(self) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
-        """Get edges between operations and machines they can be processed on."""
-        op_machine_edges = []
-        machine_op_edges = []
+    def _get_operation_machine_edges(self) -> Tuple[List[int], List[int], List[int], List[int]]:
+        """Get edges between operations and machines they can be processed on in PyG format."""
+        op_sources = []
+        machine_targets = []
+        machine_sources = []
+        op_targets = []
         
         for op_id in range(self.num_operations):
             operation = self.problem_data.get_operation(op_id)
             for machine_id in operation.compatible_machines:
-                op_machine_edges.append((op_id, machine_id))
-                machine_op_edges.append((machine_id, op_id))
+                # Operation -> Machine edges
+                op_sources.append(op_id)
+                machine_targets.append(machine_id)
+                # Machine -> Operation edges
+                machine_sources.append(machine_id)
+                op_targets.append(op_id)
                 
-        return op_machine_edges, machine_op_edges
+        return op_sources, machine_targets, machine_sources, op_targets
     
     def _get_earliest_start_time(self, op_id: int) -> float:
         """Calculate the earliest possible start time for an operation."""
@@ -354,12 +359,8 @@ class GraphState:
             op_idx: Operation index to schedule
             machine_idx: Machine index to schedule the operation on
         """
-        if op_idx not in self.ready_operations:
-            raise ValueError(f"Operation {op_idx} is not ready to be scheduled")
         
         operation = self.problem_data.get_operation(op_idx)
-        if machine_idx not in operation.compatible_machines:
-            raise ValueError(f"Operation {op_idx} cannot be processed on machine {machine_idx}")
         
         # Calculate processing time and completion time
         processing_time = operation.get_processing_time(machine_idx)
@@ -374,10 +375,6 @@ class GraphState:
         
         # Update machine state
         self.machine_available_times[machine_idx] = completion_time
-        self.machine_workloads[machine_idx] += processing_time
-        
-        # Update current time
-        self.current_time = max(self.current_time, completion_time)
         
         # Update ready operations
         self._update_ready_operations()
@@ -387,26 +384,32 @@ class GraphState:
         self._update_dynamic_edges(op_idx, machine_idx)
     
     def _update_graph_features(self):
-        """Update dynamic features in the heterogeneous graph (EXTENDED: includes job features)."""
-        max_due_date = self.problem_data.get_max_due_date()
-        max_workload = max(self.machine_workloads.max(), 1.0)
+        """Update dynamic features in the heterogeneous graph"""
+        current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
-        # Update job features (NEW: dynamic job-level information)
+        # Update job features
         self._update_job_features()
         
-        # Update operation features (status, completion_time, earliest_start_time)
-        # NOTE: Indices shifted due to job_progress removal (8 features instead of 9)
         for op_id in range(self.num_operations):
             self.hetero_data['op'].x[op_id, 4] = self.operation_status[op_id]  # status (0: unscheduled, 1: scheduled)
-            self.hetero_data['op'].x[op_id, 5] = self.operation_completion_times[op_id] / max_due_date  # completion_time
-            self.hetero_data['op'].x[op_id, 6] = self._get_earliest_start_time(op_id) / max_due_date  # earliest_start_time
+            
+            # Start time and completion time (normalized by current makespan, 0 if not scheduled)
+            if self.operation_status[op_id] == 1:  # scheduled
+                operation = self.problem_data.get_operation(op_id)
+                start_time = self.operation_completion_times[op_id] - operation.get_processing_time(self.operation_machine_assignments[op_id])
+                self.hetero_data['op'].x[op_id, 5] = start_time / current_makespan  # start_time
+                self.hetero_data['op'].x[op_id, 6] = self.operation_completion_times[op_id] / current_makespan  # completion_time
+            else:  # not scheduled
+                self.hetero_data['op'].x[op_id, 5] = 0.0  # start_time
+                self.hetero_data['op'].x[op_id, 6] = 0.0  # completion_time
+            
+            self.hetero_data['op'].x[op_id, 7] = self._get_earliest_start_time(op_id) / current_makespan  # earliest_start_time
         
         # Update machine features (available_time, total_workload, ready ops statistics)
         max_proc_time = self.problem_data.get_max_processing_time()
         
         for m_id in range(self.num_machines):
-            self.hetero_data['machine'].x[m_id, 0] = self.machine_available_times[m_id] / max_due_date  # available_time
-            self.hetero_data['machine'].x[m_id, 1] = self.machine_workloads[m_id] / max_workload  # total_workload
+            self.hetero_data['machine'].x[m_id, 0] = self.machine_available_times[m_id] / current_makespan  # available_time
             
             # Calculate statistics for ready operations that can be processed by this machine
             ready_proc_times = []
@@ -418,60 +421,39 @@ class GraphState:
             
             # Update processing time statistics features
             if ready_proc_times:
-                self.hetero_data['machine'].x[m_id, 2] = len(ready_proc_times) / max(len(self.ready_operations), 1)  # num_compatible_ready_ops
-                self.hetero_data['machine'].x[m_id, 3] = np.mean(ready_proc_times) / max_proc_time  # ready_ops_proc_time_mean
-                self.hetero_data['machine'].x[m_id, 4] = np.min(ready_proc_times) / max_proc_time   # ready_ops_proc_time_min
-                self.hetero_data['machine'].x[m_id, 5] = np.max(ready_proc_times) / max_proc_time   # ready_ops_proc_time_max
-                self.hetero_data['machine'].x[m_id, 6] = np.std(ready_proc_times) / max_proc_time   # ready_ops_proc_time_std
+                self.hetero_data['machine'].x[m_id, 1] = len(ready_proc_times) / max(len(self.ready_operations), 1)  # num_compatible_ready_ops
+                self.hetero_data['machine'].x[m_id, 2] = np.mean(ready_proc_times) / max_proc_time  # ready_ops_proc_time_mean
+                self.hetero_data['machine'].x[m_id, 3] = np.min(ready_proc_times) / max_proc_time   # ready_ops_proc_time_min
+                self.hetero_data['machine'].x[m_id, 4] = np.max(ready_proc_times) / max_proc_time   # ready_ops_proc_time_max
+                self.hetero_data['machine'].x[m_id, 5] = np.std(ready_proc_times) / max_proc_time   # ready_ops_proc_time_std
             else:
                 # No compatible ready operations
-                self.hetero_data['machine'].x[m_id, 2] = 0.0  # num_compatible_ready_ops
-                self.hetero_data['machine'].x[m_id, 3] = 0.0  # ready_ops_proc_time_mean
-                self.hetero_data['machine'].x[m_id, 4] = 0.0  # ready_ops_proc_time_min
-                self.hetero_data['machine'].x[m_id, 5] = 0.0  # ready_ops_proc_time_max
-                self.hetero_data['machine'].x[m_id, 6] = 0.0  # ready_ops_proc_time_std
+                self.hetero_data['machine'].x[m_id, 1] = 0.0  # num_compatible_ready_ops
+                self.hetero_data['machine'].x[m_id, 2] = 0.0  # ready_ops_proc_time_mean
+                self.hetero_data['machine'].x[m_id, 3] = 0.0  # ready_ops_proc_time_min
+                self.hetero_data['machine'].x[m_id, 4] = 0.0  # ready_ops_proc_time_max
+                self.hetero_data['machine'].x[m_id, 5] = 0.0  # ready_ops_proc_time_std
     
     def _update_job_features(self):
         """
-        Update dynamic job node features (NEW: hierarchical structure).
+        Update dynamic job node features
         
-        Updates: num_remaining_ops, remaining_workload, job_status
+        Updates: num_remaining_ops
         """
-        max_ops_per_job = max(len(self.problem_data.get_job_operations(job_id)) for job_id in range(self.num_jobs))
-        max_proc_time = self.problem_data.get_max_processing_time()
-        
         for job_id in range(self.num_jobs):
             job_operations = self.problem_data.get_job_operations(job_id)
             
             # Update dynamic features
             remaining_ops = sum(1 for op in job_operations if self.operation_status[op.operation_id] == 0)
-            self.hetero_data['job'].x[job_id, 4] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
-            
-            # Remaining workload (estimated)
-            remaining_workload = sum(min(op.get_processing_time(m_id) for m_id in op.compatible_machines) 
-                                   for op in job_operations if self.operation_status[op.operation_id] == 0)
-            self.hetero_data['job'].x[job_id, 5] = remaining_workload / (max_proc_time * max_ops_per_job)  # remaining_workload (normalized)
-            
-            # Job status: 0=not started, 1=in progress, 2=completed
-            if all(self.operation_status[op.operation_id] == 1 for op in job_operations):
-                job_status = 2  # completed
-            elif any(self.operation_status[op.operation_id] == 1 for op in job_operations):
-                job_status = 1  # in progress
-            else:
-                job_status = 0  # not started
-            self.hetero_data['job'].x[job_id, 6] = job_status / 2.0  # job_status (normalized)
+            self.hetero_data['job'].x[job_id, 3] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
     
     def get_observation(self) -> HeteroData:
         """
         Get the current graph observation.
         
-        PERFORMANCE OPTIMIZED: Flushes pending edge updates before returning observation.
-        
         Returns:
             Current HeteroData object representing the state
         """
-        # Flush any pending edge updates before returning observation
-        self._flush_pending_edges()
         return self.hetero_data
     
     def get_ready_operations(self) -> List[int]:
@@ -506,17 +488,12 @@ class GraphState:
     
     def reset(self):
         """Reset the state to initial conditions."""
-        self.current_time = 0
         self.operation_status.fill(0)  # all unscheduled
         self.operation_completion_times.fill(0)
         self.machine_available_times.fill(0)
-        self.machine_workloads.fill(0)
         self.ready_operations.clear()
         self.operation_machine_assignments.clear()
         self.last_op_on_machine = {m_id: None for m_id in range(self.num_machines)}
-        
-        # PERFORMANCE OPTIMIZATION: Clear pending edge updates
-        self.pending_machine_precedes_edges.clear()
         
         # Rebuild the graph with fresh features
         self.hetero_data = self._build_initial_graph()
@@ -528,8 +505,6 @@ class GraphState:
         """
         Dynamically add disjunctive arcs between operations on the same machine.
         
-        PERFORMANCE OPTIMIZED: Batches edge updates instead of incremental torch.cat.
-        
         Args:
             scheduled_op_idx: The operation that was just scheduled
             machine_idx: The machine it was assigned to
@@ -537,68 +512,47 @@ class GraphState:
         # Find the last operation that was scheduled on this machine
         last_op_on_this_machine = self.last_op_on_machine[machine_idx]
         
-        # If there was a previous operation, queue the edge for batch update
+        # If there was a previous operation, add the disjunctive edge immediately
         if last_op_on_this_machine is not None:
             # Get processing time of the last operation (this is the temporal delay ΔT)
             last_operation = self.problem_data.get_operation(last_op_on_this_machine)
             last_op_assigned_machine = self.operation_machine_assignments.get(last_op_on_this_machine, machine_idx)
             last_op_processing_time = last_operation.get_processing_time(last_op_assigned_machine)
             
-            # Queue the edge for batch update (src, dst, attr)
-            self.pending_machine_precedes_edges.append((
+            # Add the disjunctive edge immediately
+            self._add_machine_precedes_edge(
                 last_op_on_this_machine, 
                 scheduled_op_idx, 
                 last_op_processing_time
-            ))
+            )
         
-        # CRITICAL: Update the tracker to remember that the current operation is now 
+        # Update the tracker to remember that the current operation is now 
         # the last one scheduled on this machine
         self.last_op_on_machine[machine_idx] = scheduled_op_idx
         
-        # Optional: Also add assignment edges for completeness
+        # Also add assignment edges for completeness
         self._add_assignment_edges(scheduled_op_idx, machine_idx)
     
-    def _flush_pending_edges(self):
+    def _add_machine_precedes_edge(self, src_op: int, dst_op: int, processing_time: float):
         """
-        PERFORMANCE OPTIMIZATION: Batch update all pending machine_precedes edges.
+        Add a single machine_precedes edge immediately to the graph.
         
-        This method converts O(n) individual torch.cat operations into a single 
-        large concatenation, significantly improving performance for long episodes.
+        Args:
+            src_op: Source operation ID
+            dst_op: Destination operation ID  
+            processing_time: Processing time of source operation (edge attribute)
         """
-        if not self.pending_machine_precedes_edges:
-            return  # No pending edges to flush
-            
-        edge_type = ('op', 'machine_precedes', 'op')
-        
-        # Initialize edge type if it doesn't exist
-        if edge_type not in self.hetero_data.edge_types:
-            self.hetero_data[edge_type].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
-            self.hetero_data[edge_type].edge_attr = torch.empty((0, 1), dtype=torch.float32, device=self.device)
-        
-        # Convert pending edges to tensors
-        src_nodes = []
-        dst_nodes = []
-        edge_attrs = []
-        
-        for src, dst, attr in self.pending_machine_precedes_edges:
-            src_nodes.append(src)
-            dst_nodes.append(dst)
-            edge_attrs.append(attr)
-        
         # Create new edge tensors
-        new_edges = torch.tensor([src_nodes, dst_nodes], dtype=torch.long, device=self.device)
-        new_attrs = torch.tensor([[attr] for attr in edge_attrs], dtype=torch.float32, device=self.device)
+        new_edge = torch.tensor([[src_op], [dst_op]], dtype=torch.long, device=self.device)
+        new_attr = torch.tensor([[processing_time]], dtype=torch.float32, device=self.device)
         
-        # Single concatenation instead of multiple small ones
-        self.hetero_data[edge_type].edge_index = torch.cat(
-            [self.hetero_data[edge_type].edge_index, new_edges], dim=1
+        # Add edge immediately (edge type already initialized)
+        self.hetero_data['op', 'machine_precedes', 'op'].edge_index = torch.cat(
+            [self.hetero_data['op', 'machine_precedes', 'op'].edge_index, new_edge], dim=1
         )
-        self.hetero_data[edge_type].edge_attr = torch.cat(
-            [self.hetero_data[edge_type].edge_attr, new_attrs], dim=0
+        self.hetero_data['op', 'machine_precedes', 'op'].edge_attr = torch.cat(
+            [self.hetero_data['op', 'machine_precedes', 'op'].edge_attr, new_attr], dim=0
         )
-        
-        # Clear pending edges
-        self.pending_machine_precedes_edges.clear()
     
     def _add_assignment_edges(self, scheduled_op_idx: int, machine_idx: int):
         """
@@ -608,21 +562,13 @@ class GraphState:
             scheduled_op_idx: The operation that was just scheduled
             machine_idx: The machine it was assigned to
         """
-        # Create assignment edge type if it doesn't exist
-        if ('op', 'assigned_to', 'machine') not in self.hetero_data.edge_types:
-            # PERFORMANCE OPTIMIZATION: Use stored device instead of querying
-            self.hetero_data['op', 'assigned_to', 'machine'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
-        
-        # Add the new assignment edge
+        # Add the new assignment edge (edge type already initialized)
         current_edges = self.hetero_data['op', 'assigned_to', 'machine'].edge_index
         new_edge = torch.tensor([[scheduled_op_idx], [machine_idx]], dtype=torch.long, device=self.device)
         updated_edges = torch.cat([current_edges, new_edge], dim=1)
         self.hetero_data['op', 'assigned_to', 'machine'].edge_index = updated_edges
         
-        # Also add reverse edge for symmetry
-        if ('machine', 'processes', 'op') not in self.hetero_data.edge_types:
-            self.hetero_data['machine', 'processes', 'op'].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
-        
+        # Also add reverse edge for symmetry (edge type already initialized)
         current_reverse_edges = self.hetero_data['machine', 'processes', 'op'].edge_index
         new_reverse_edge = torch.tensor([[machine_idx], [scheduled_op_idx]], dtype=torch.long, device=self.device)
         updated_reverse_edges = torch.cat([current_reverse_edges, new_reverse_edge], dim=1)

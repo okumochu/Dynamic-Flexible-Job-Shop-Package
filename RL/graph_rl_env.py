@@ -17,13 +17,12 @@ class GraphRlEnv(gym.Env):
     and machines are nodes with different features, connected by various edge types.
     """
     
-    def __init__(self, problem_data: FlexibleJobShopDataHandler, max_episode_steps: Optional[int] = None, alpha: float = 0.0, device: Optional[str] = None):
+    def __init__(self, problem_data: FlexibleJobShopDataHandler, alpha: float = 0.0, device: str = "cpu"):
         """
         Initialize the FJSP Graph RL Environment.
         
         Args:
             problem_data: FlexibleJobShopDataHandler instance with the problem definition
-            max_episode_steps: Maximum number of steps per episode (default: 2 * num_operations)
             alpha: Weight for multi-objective optimization. 
                    0.0 = pure makespan minimization
                    1.0 = pure tardiness minimization  
@@ -40,9 +39,8 @@ class GraphRlEnv(gym.Env):
         self.weights = problem_data.get_jobs_weight()
         
         # Episode management
-        self.max_episode_steps = max_episode_steps or (2 * problem_data.num_operations)
         self.current_step = 0
-        self.last_makespan = float('inf')
+        self.last_makespan = 0.0  # Start with 0 instead of inf
         self.last_total_weighted_tardiness = 0.0  # Track previous tardiness for reward calculation
         
         # Action space: discrete actions representing (operation, machine) pairs
@@ -102,7 +100,7 @@ class GraphRlEnv(gym.Env):
         # Reset the graph state
         self.graph_state.reset()
         self.current_step = 0
-        self.last_makespan = float('inf')
+        self.last_makespan = 0.0  # Start with 0 instead of inf
         self.last_total_weighted_tardiness = 0.0  # Reset tardiness tracking
         
         # Get initial observation
@@ -159,7 +157,6 @@ class GraphRlEnv(gym.Env):
         
         # Check terminal conditions
         terminated = self.graph_state.is_done()
-        truncated = self.current_step >= self.max_episode_steps
         
         # Get updated observation
         observation = self.graph_state.get_observation()
@@ -168,14 +165,8 @@ class GraphRlEnv(gym.Env):
         info = self._get_step_info()
         info['action_taken'] = (op_idx, machine_idx)
         
-        # Track episode statistics
-        if terminated or truncated:
-            final_makespan = self.graph_state.get_makespan()
-            self.episode_makespans.append(final_makespan)
-            info['episode_makespan'] = final_makespan
-            info['episode_length'] = self.current_step
         
-        return observation, reward, terminated, truncated, info
+        return observation, reward, terminated, None, info
     
     def _calculate_reward(self, prev_makespan: float) -> float:
         """

@@ -28,14 +28,14 @@ class ExperimentConfig:
         
         # Common RL parameters (shared by all RL methods)
         self.common_rl_params = {
-            'alpha': 0,  # TWT weight in objective
-            'gae_lambda': 0.5,
+            'alpha': 0.5,  # TWT weight in objective
+            'gae_lambda': 0.95,
             'clip_ratio': 0.2,
             'entropy_coef': 0.01, # graph RL no use
             'value_coef': 0.5,  # Value loss coefficient for PPO
             'use_reward_shaping': True,  # Whether to use dense rewards
             'test_interval': 10,  # How often to test generalization (in epochs)
-            'device': "auto",  # Device for training ('auto', 'cpu', 'cuda', etc.)
+            'device': "cuda",  # Device for training ('cpu', 'cuda')
             'test_envs': 30,  # Number of test environments for generalization runs
             'episodes_per_epoch': 2,  # Number of episodes to collect per epoch
             'epochs': 4000,  # Very quick training run for Gantt chart generation
@@ -66,21 +66,14 @@ class ExperimentConfig:
         # Graph RL specific parameters
         self.graph_rl_params = {
             # Network Architecture
-            'hidden_dim': 128,  # Hidden dimension for graph networks (must be divisible by num_heads)
-            'num_hgt_layers': 2,  # Number of HGT layers
-            'num_heads': 4,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
+            'hidden_dim': 32,  # Hidden dimension for graph networks (must be divisible by num_heads)
+            'num_hgt_layers': 3,  # Number of HGT layers
+            'num_heads': 2,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
             'dropout': 0.1,  # Dropout rate for graph networks
-            
-            # Temporal Encoding (for HGT RTE)
-            'temporal_dim': 16,  # Dimension for temporal embeddings in machine_precedes edges
-            'max_temporal_freq': 1000.0,  # Maximum frequency for sinusoidal temporal encoding
             
             # Learning Parameters
             'lr': 3e-4,  # Unified learning rate for graph RL
-            'gamma': 0.999,  # Discount factor for graph RL
-            
-            # Multi-Objective Optimization
-            'alpha': 0.5,  # Multi-objective weight: 0.0=pure makespan, 1.0=pure tardiness, 0.5=balanced
+            'gamma': 1,  # Discount factor for graph RL
             
             # Feature Engineering (optional overrides - normally auto-detected)
             'op_feature_dim': None,  # Override operation feature dimension (None=auto-detect)

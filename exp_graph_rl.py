@@ -79,7 +79,7 @@ def evaluate_graph_policy(model_path: str, env: GraphRlEnv, num_episodes: int = 
             obs = obs.to(trainer.device)
             
             with torch.no_grad():
-                action_logits, value, action_mask, valid_pairs = trainer.policy(obs)
+                action_logits, value = trainer.policy(obs)
                 
                 if len(action_logits) == 0:
                     print(f"Warning: No valid actions in episode {episode}, step {episode_length}")
@@ -89,8 +89,9 @@ def evaluate_graph_policy(model_path: str, env: GraphRlEnv, num_episodes: int = 
                 action_idx = torch.argmax(action_logits).item()
                 
                 # Convert to environment action
-                if action_idx < len(valid_pairs):
-                    target_pair = valid_pairs[action_idx]
+                valid_actions = env.graph_state.get_valid_actions()
+                if action_idx < len(valid_actions):
+                    target_pair = valid_actions[action_idx]
                     env_action = env.pair_to_action_map.get(tuple(target_pair))
                     if env_action is None:
                         print(f"Warning: Could not find environment action for pair {target_pair}")
@@ -315,12 +316,15 @@ def run_single_graph_rl_experiment():
     while not done:
         obs = obs.to(trainer.device)
         with torch.no_grad():
-            action_logits, _, _, valid_pairs = trainer.policy(obs)
+            action_logits, _ = trainer.policy(obs)
             if len(action_logits) == 0:
                 break
             action_idx = torch.argmax(action_logits).item()
-            if action_idx < len(valid_pairs):
-                target_pair = valid_pairs[action_idx]
+            
+            # Get valid actions from environment
+            valid_actions = env.graph_state.get_valid_actions()
+            if action_idx < len(valid_actions):
+                target_pair = valid_actions[action_idx]
                 env_action = env.pair_to_action_map.get(tuple(target_pair))
                 if env_action is None:
                     break

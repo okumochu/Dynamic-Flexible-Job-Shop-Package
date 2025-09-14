@@ -30,6 +30,10 @@ class GraphState:
         self.operation_completion_times = np.zeros(self.num_operations, dtype=float)
         self.machine_available_times = np.zeros(self.num_machines, dtype=float)
         
+        # Track job timing (raw values, not normalized)
+        self.job_start_times = np.zeros(self.num_jobs, dtype=float)  # Raw start time for each job
+        self.job_finished_times = np.zeros(self.num_jobs, dtype=float)  # Raw finished time for each job
+        
         # Track which operations are ready to be scheduled (not yet scheduled and predecessors done)
         self.ready_operations = set()
         
@@ -86,10 +90,10 @@ class GraphState:
         Build initial job node features
         
         Returns:
-            Array of shape (num_jobs, 4) with normalized features:
-            [due_date, num_total_ops, priority_weight, num_remaining_ops]
+            Array of shape (num_jobs, 6) with normalized features:
+            [due_date, num_total_ops, priority_weight, num_remaining_ops, start_time, finished_time]
         """
-        features = np.zeros((self.num_jobs, 4))
+        features = np.zeros((self.num_jobs, 6))
         
         # Get normalization factors
         max_due_date = self.problem_data.get_max_due_date()
@@ -97,6 +101,7 @@ class GraphState:
         due_dates = self.problem_data.get_jobs_due_date()
         weights = self.problem_data.get_jobs_weight()
         max_weight = max(weights) if weights else 1.0
+        current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
         for job_id in range(self.num_jobs):
             job_operations = self.problem_data.get_job_operations(job_id)
@@ -109,6 +114,10 @@ class GraphState:
             # Dynamic features (will be updated during episode)
             remaining_ops = sum(1 for op in job_operations if self.operation_status[op.operation_id] == 0)
             features[job_id, 3] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
+            
+            # Job timing features (initialized as 0, normalized by makespan)
+            features[job_id, 4] = 0.0  # start_time (normalized)
+            features[job_id, 5] = 0.0  # finished_time (normalized)
         
         # Set feature dimension dynamically
         self.job_feature_dim = features.shape[1]
@@ -380,15 +389,15 @@ class GraphState:
         self._update_ready_operations()
         
         # Update graph features and optionally edges
-        self._update_graph_features()
+        self._update_graph_features(op_idx, start_time, completion_time)
         self._update_dynamic_edges(op_idx, machine_idx)
     
-    def _update_graph_features(self):
+    def _update_graph_features(self, op_idx: int = None, start_time: float = None, completion_time: float = None):
         """Update dynamic features in the heterogeneous graph"""
         current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
         # Update job features
-        self._update_job_features()
+        self._update_job_features(op_idx, start_time, completion_time)
         
         for op_id in range(self.num_operations):
             self.hetero_data['op'].x[op_id, 4] = self.operation_status[op_id]  # status (0: unscheduled, 1: scheduled)
@@ -434,18 +443,41 @@ class GraphState:
                 self.hetero_data['machine'].x[m_id, 4] = 0.0  # ready_ops_proc_time_max
                 self.hetero_data['machine'].x[m_id, 5] = 0.0  # ready_ops_proc_time_std
     
-    def _update_job_features(self):
+    def _update_job_features(self, op_idx: int = None, start_time: float = None, completion_time: float = None):
         """
         Update dynamic job node features
         
-        Updates: num_remaining_ops
+        Updates: num_remaining_ops, start_time, finished_time
+        
+        Args:
+            op_idx: Operation index that was scheduled (optional)
+            start_time: Start time of the operation (optional)
+            completion_time: Completion time of the operation (optional)
         """
+        # Update job timing only for specific operations
+        job_id, op_position = self.problem_data.get_operation_info(op_idx)
+        job_operations = self.problem_data.get_job_operations(job_id)
+        
+        # Update job start time ONLY when first operation starts
+        if op_position == 0 and self.job_start_times[job_id] == 0:  # First operation AND not started yet
+            self.job_start_times[job_id] = start_time
+        
+        # Update job finished time ONLY when last operation finishes
+        if op_position == len(job_operations) - 1:  # Last operation in job
+            self.job_finished_times[job_id] = completion_time
+        
+        current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
+        
         for job_id in range(self.num_jobs):
             job_operations = self.problem_data.get_job_operations(job_id)
             
             # Update dynamic features
             remaining_ops = sum(1 for op in job_operations if self.operation_status[op.operation_id] == 0)
             self.hetero_data['job'].x[job_id, 3] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
+            
+            # Update job timing features (normalized by makespan)
+            self.hetero_data['job'].x[job_id, 4] = self.job_start_times[job_id] / current_makespan  # start_time (normalized)
+            self.hetero_data['job'].x[job_id, 5] = self.job_finished_times[job_id] / current_makespan  # finished_time (normalized)
     
     def get_observation(self) -> HeteroData:
         """
@@ -485,12 +517,35 @@ class GraphState:
         else:
             return 0.0  # No operations scheduled yet
     
+    def get_total_weighted_tardiness(self) -> float:
+        """
+        Calculate Total Weighted Tardiness (TWT) for completed jobs.
+        Utilizes raw job finished_time values for efficient calculation.
+        
+        Returns:
+            Total weighted tardiness value
+        """
+        total_weighted_tardiness = 0.0
+        
+        for job_id in range(self.num_jobs):
+            # Use raw finished_time if job is completed (finished_time > 0)
+            if self.job_finished_times[job_id] > 0:
+                due_date = self.problem_data.get_jobs_due_date()[job_id]
+                weight = self.problem_data.get_jobs_weight()[job_id]
+                job_completion_time = self.job_finished_times[job_id]
+                tardiness = max(0.0, job_completion_time - due_date)
+                total_weighted_tardiness += weight * tardiness
+        
+        return total_weighted_tardiness
+    
     
     def reset(self):
         """Reset the state to initial conditions."""
         self.operation_status.fill(0)  # all unscheduled
         self.operation_completion_times.fill(0)
         self.machine_available_times.fill(0)
+        self.job_start_times.fill(0)  # Reset job timing
+        self.job_finished_times.fill(0)  # Reset job timing
         self.ready_operations.clear()
         self.operation_machine_assignments.clear()
         self.last_op_on_machine = {m_id: None for m_id in range(self.num_machines)}

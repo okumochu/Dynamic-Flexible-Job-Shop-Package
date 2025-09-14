@@ -18,14 +18,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch_geometric.data import Batch
 from typing import Dict, List, Tuple, Optional
-
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    wandb = None
-    print("Weights & Biases not available. Install with: pip install wandb")
+import wandb
 
 # Import project modules
 from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
@@ -107,12 +100,7 @@ class GraphPPOTrainer:
         self.episode_twts = []
         self.episode_objectives = []
         self.episode_rewards = []
-        
-        # Set device
-        if device == 'auto':
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        else:
-            self.device = torch.device(device)
+        self.device = torch.device(device)
         
         print(f"Using device: {self.device}")
         
@@ -156,9 +144,10 @@ class GraphPPOTrainer:
         # Initialize optimizer with better defaults
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr, eps=1e-5)
         
-        # Initialize buffer - better size estimation based on problem complexity
-        estimated_steps_per_episode = min(self.env.problem_data.num_operations * 3, 1000)  # Cap for large problems
-        buffer_size = max(2048, self.episodes_per_epoch * estimated_steps_per_episode)  # Minimum buffer size
+        # Initialize buffer - use upper bound: max_operations * episodes_per_epoch
+        # Buffer will be cleared after each update (PPO is on-policy)
+        max_steps_per_episode = self.env.problem_data.num_operations
+        buffer_size = max_steps_per_episode * self.episodes_per_epoch
         self.buffer = GraphPPOBuffer(buffer_size, self.device)
         
         # Learning rate scheduler for better convergence
@@ -193,7 +182,7 @@ class GraphPPOTrainer:
         print(f"  Learning rate: {rl_params['lr']}")
         print(f"  Simplified PPO: No entropy regularization or KL divergence (due to variable action spaces)")
     
-    def collect_rollout(self, buffer: GraphPPOBuffer, epoch: int) -> Dict:
+    def collect_rollout(self, buffer: GraphPPOBuffer) -> Dict:
         """
         Collect rollout data for one epoch.
         
@@ -219,9 +208,9 @@ class GraphPPOTrainer:
             episode_steps = 0
             
             # Run episode until completion
-            while not self.env.graph_state.is_done() and episode_steps < self.env.max_episode_steps:
+            while not self.env.graph_state.is_done():
                 # Get valid actions from environment info (from last reset or step)
-                env_valid_actions = info.get('valid_actions', [])
+                env_valid_actions = info['valid_actions']
                 
                 # Get action from policy - always produces valid action logits
                 with torch.no_grad():
@@ -239,28 +228,21 @@ class GraphPPOTrainer:
                 
                 # Step environment
                 next_obs, reward, terminated, truncated, info = self.env.step(env_action)
-                done = terminated or truncated
                 
-                # Store experience in buffer
+                # Store experience in buffer (keep on device for efficiency)
                 buffer.add(
-                    obs=obs.cpu(),
-                    action=action_idx.cpu().item(),
+                    obs=obs,  # Keep on device
+                    action=action_idx.item(),
                     reward=reward,
-                    value=value.cpu().item(),
-                    log_prob=log_prob.cpu().item(),
+                    value=value.item(),
+                    log_prob=log_prob.item(),
                     valid_pairs=env_valid_actions.copy(),  # Store copy to avoid reference issues
-                    done=done
+                    done=terminated
                 )
                 
                 # Update episode statistics
                 episode_reward += reward
-                episode_steps += 1
-                
-                # Store final info when episode ends
-                if done:
-                    final_info = info
-                    break
-                    
+                episode_steps += 1                    
                 obs = next_obs.to(self.device)
             
             # Track completion
@@ -269,14 +251,7 @@ class GraphPPOTrainer:
             
             # Extract final episode metrics from environment
             final_makespan = self.env.graph_state.get_makespan()
-            
-            # Extract TWT from final episode info if available
-            final_twt = 0.0
-            if 'final_info' in locals() and final_info is not None:
-                final_twt = final_info.get('total_weighted_tardiness', 0.0)
-            else:
-                # Fallback: calculate TWT directly from environment
-                final_twt = self.env._calculate_total_weighted_tardiness()
+            final_twt = self.env.graph_state.get_total_weighted_tardiness()
             
             # Calculate multi-objective using alpha parameter  
             alpha = self.env.alpha  # Get alpha from environment
@@ -287,14 +262,11 @@ class GraphPPOTrainer:
             self.episode_twts.append(final_twt)
             self.episode_objectives.append(objective)
             self.episode_rewards.append(episode_reward)
-            
-            # Store episode metrics for epoch-level aggregation (no individual logging to avoid step conflicts)
         
-        # Get current buffer state
-        current_buffer_size = self.buffer.size
-        
+        # Return collection statistics
         return {
-            'episodes_completed': epoch_episodes_completed
+            'episodes_completed': epoch_episodes_completed,
+            'total_steps': epoch_total_steps
         }
     
     def update_policy(self) -> Dict:
@@ -306,111 +278,95 @@ class GraphPPOTrainer:
         """
         self.policy.train()
         
-        # Get batch from buffer
+        # Get batch from buffer (already on device)
         batch = self.buffer.get_batch()
         
-        if len(batch['observations']) == 0:
-            return {'policy_loss': 0, 'value_loss': 0, 'optimizer_stepped': False}
-        
-        # Convert batch data to tensors for PPOUpdater
-        rewards = torch.as_tensor(batch['rewards'], device=self.device, dtype=torch.float32)
-        values = torch.as_tensor(batch['values'], device=self.device, dtype=torch.float32)
-        dones = torch.as_tensor(batch['dones'], device=self.device, dtype=torch.bool)
+        # Extract tensors (already on correct device)
+        rewards = batch['rewards']
+        values = batch['values']
+        dones = batch['dones']
         
         # Compute GAE advantages using tested PPOUpdater
         advantages, returns = PPOUpdater.compute_gae_advantages(
             rewards, values, dones, self.gamma, self.gae_lambda
         )
         
-        # Normalize advantages
-        if len(advantages) > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Store old log probs for PPO clipping (already on device)
+        old_log_probs = batch['log_probs']
         
-        # Store old log probs for PPO clipping 
-        old_log_probs = torch.as_tensor(batch['log_probs'], device=self.device, dtype=torch.float32)
-        
-        # Multiple epochs of PPO updates
-        # Use episodes_per_epoch as num_ppo_epochs
-        # Use full batch to respect episode boundaries and potential-based reward shaping
+        # Process full batch without mini-batching for small problems
         total_policy_loss = 0
         total_value_loss = 0
         num_updates_performed = 0
-        # Use full batch size to maintain episode coherence for potential-based rewards
-        mini_batch_size = len(batch['observations'])
         
-        for _ in range(self.episodes_per_epoch):
-            # Shuffle observations while maintaining full batch for episode coherence
-            indices = torch.randperm(len(batch['observations']))
+        # Multiple PPO updates on the same data (train_per_episode times)
+        for _ in range(self.train_per_episode):
+            # Process batch in order (no shuffling for size-variant action spaces)
+            # Each step has different valid action pairs, so shuffling breaks the sequence
             
-            for start_idx in range(0, len(indices), mini_batch_size):
-                end_idx = start_idx + mini_batch_size
-                mini_batch_indices = indices[start_idx:end_idx]
+            # Get batch data in original order
+            batch_obs = batch['observations']
+            batch_valid_pairs = batch['valid_action_pairs']
+            batch_actions = torch.as_tensor(batch['actions'], device=self.device)
+            batch_advantages = advantages
+            batch_returns = returns
+            batch_old_log_probs = old_log_probs
+            
+            # Create batch from individual HeteroData observations
+            batch_graphs = Batch.from_data_list([obs.to(self.device) for obs in batch_obs])
+            
+            # Forward pass through the policy network
+            batch_action_logits, batch_values = self.policy.forward(batch_graphs, batch_valid_pairs)
+            
+            # Process results for each graph in the batch
+            policy_losses = []
+            value_losses = []
+            
+            for i in range(len(batch_obs)):
+                action_logits = batch_action_logits[i]  # Action logits for graph i
+                value = batch_values[i]  # Value estimate for graph i
+                action_idx = batch_actions[i].item()
                 
-                # Get batch data (full batch for episode coherence)
-                mini_batch_obs = [batch['observations'][i] for i in mini_batch_indices]
-                mini_batch_valid_pairs = [batch['valid_action_pairs'][i] for i in mini_batch_indices]
-                mini_batch_actions = torch.as_tensor([batch['actions'][i] for i in mini_batch_indices], device=self.device)
-                mini_batch_advantages = advantages[mini_batch_indices]
-                mini_batch_returns = returns[mini_batch_indices]
-                mini_batch_old_log_probs = old_log_probs[mini_batch_indices]
+                # Create distribution and compute log prob for the stored action
+                dist = Categorical(logits=action_logits)
+                new_log_prob = dist.log_prob(torch.as_tensor(action_idx, device=self.device))
+
+                # PPO policy loss
+                policy_loss = PPOUpdater.ppo_policy_loss(
+                    new_log_prob.unsqueeze(0), batch_old_log_probs[i].unsqueeze(0), 
+                    batch_advantages[i].unsqueeze(0), self.clip_ratio
+                )
                 
-                # PERFORMANCE CRITICAL: Batched forward pass instead of sequential processing
-                # Create a batch from individual HeteroData observations
-                batch_graphs = Batch.from_data_list([obs.to(self.device) for obs in mini_batch_obs])
+                # Value loss
+                value_loss = F.mse_loss(value, batch_returns[i])
                 
-                # Batched forward pass through the policy network
-                batch_action_logits, batch_values = self.policy.forward(batch_graphs, mini_batch_valid_pairs)
-                
-                # Process results for each graph in the batch
-                policy_losses = []
-                value_losses = []
-                
-                for i in range(len(mini_batch_obs)):
-                    action_logits = batch_action_logits[i]  # Action logits for graph i
-                    value = batch_values[i]  # Value estimate for graph i
-                    action_idx = mini_batch_actions[i].item()
-                    
-                    # Create distribution and compute log prob for the stored action
-                    if len(action_logits) > 0:
-                        dist = Categorical(logits=action_logits)
-                        new_log_prob = dist.log_prob(torch.as_tensor(action_idx, device=self.device))
-                    else:
-                        # Handle edge case where no valid actions exist
-                        new_log_prob = torch.tensor(0.0, device=self.device)
-                    
-                    # PPO policy loss
-                    policy_loss = PPOUpdater.ppo_policy_loss(
-                        new_log_prob.unsqueeze(0), mini_batch_old_log_probs[i].unsqueeze(0), 
-                        mini_batch_advantages[i].unsqueeze(0), self.clip_ratio
-                    )
-                    
-                    # Value loss
-                    value_loss = F.mse_loss(value, mini_batch_returns[i])
-                    
-                    # Store losses for this sample
-                    policy_losses.append(policy_loss)
-                    value_losses.append(value_loss)
-                
-                # Combine losses for this mini-batch
-                policy_loss = torch.stack(policy_losses).mean()
-                value_loss = torch.stack(value_losses).mean()
-                
-                # Total loss (simplified: only policy and value losses)
-                loss = policy_loss + self.value_coef * value_loss
-                
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                
-                # Clip gradients
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                
-                self.optimizer.step()
-                
-                # Accumulate statistics
-                total_policy_loss += policy_loss.item()
-                total_value_loss += value_loss.item()
-                num_updates_performed += 1
+                # Store losses for this sample
+                policy_losses.append(policy_loss)
+                value_losses.append(value_loss)
+            
+            # Combine losses for the batch
+            policy_loss = torch.stack(policy_losses).mean()
+            value_loss = torch.stack(value_losses).mean()
+            
+            # Total loss (simplified: only policy and value losses)
+            loss = policy_loss + self.value_coef * value_loss
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            
+            self.optimizer.step()
+            
+            # Update learning rate scheduler
+            self.scheduler.step()
+            
+            # Accumulate statistics
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+            num_updates_performed += 1
         
         return {
             'policy_loss': total_policy_loss / num_updates_performed,
@@ -433,25 +389,23 @@ class GraphPPOTrainer:
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
 
-        if WANDB_AVAILABLE:
-            wandb.init(
-                name=self.run_name,
-                project=self.project_name,
-                dir=wandb_dir,
-                config={
-                    "epochs": self.epochs,
-                    "episodes_per_epoch": self.episodes_per_epoch,
-                    "train_per_episode": self.train_per_episode,
-                    "lr": self.optimizer.param_groups[0]['lr'],
-                    "gamma": self.gamma,
-                    "gae_lambda": self.gae_lambda,
-                    "clip_ratio": self.clip_ratio,
-                    "hidden_dim": self.policy.hidden_dim,
-                    "num_hgt_layers": self.policy.num_hgt_layers,
-                }
+        wandb.init(
+            name=self.run_name,
+            project=self.project_name,
+            dir=wandb_dir,
+            config={
+                "epochs": self.epochs,
+                "episodes_per_epoch": self.episodes_per_epoch,
+                "train_per_episode": self.train_per_episode,
+                "lr": self.optimizer.param_groups[0]['lr'],
+                "gamma": self.gamma,
+                "gae_lambda": self.gae_lambda,
+                "clip_ratio": self.clip_ratio,
+                "hidden_dim": self.policy.hidden_dim,
+                "num_hgt_layers": self.policy.num_hgt_layers,
+            }
             )
-        else:
-            print("Warning: W&B not available, training will proceed without logging")
+
 
         # Training loop
         start_time = time.time()
@@ -459,36 +413,16 @@ class GraphPPOTrainer:
         from tqdm import tqdm
         pbar = tqdm(range(self.epochs), desc="Graph RL Training")
 
-        total_optimization_steps = 0
 
         for epoch in pbar:
             # Collect rollout data
-            collection_stats = self.collect_rollout(self.buffer, epoch)
+            collection_stats = self.collect_rollout(self.buffer)
             
             # Update agent multiple times on the same data (standard PPO practice)
-            stats = {'policy_loss': 0, 'value_loss': 0, 'optimizer_stepped': False}
+            # train_per_episode is now handled inside update_policy()
+            stats = self.update_policy()
             
-            # Train with collected data
-            for train_step in range(self.train_per_episode):
-                step_stats = self.update_policy()
-                
-                # Accumulate statistics
-                for key in ['policy_loss', 'value_loss']:
-                    stats[key] += step_stats.get(key, 0)
-                
-                if step_stats.get('optimizer_stepped', False):
-                    stats['optimizer_stepped'] = True
-                    total_optimization_steps += 1
-                    
-            
-            # Average the statistics
-            num_train_steps = self.train_per_episode
-            for key in ['policy_loss', 'value_loss']:
-                stats[key] /= max(1, num_train_steps)
-            
-            # Only update learning rate if we actually performed optimization
-            if stats.get('optimizer_stepped', False):
-                self.scheduler.step()
+            # Learning rate is updated inside update_policy()
 
             # Log training metrics
             wandb_log = {
@@ -509,25 +443,10 @@ class GraphPPOTrainer:
                 })
             
             # Log all metrics with epoch as step
-            if WANDB_AVAILABLE:
-                wandb.log(wandb_log, step=epoch)
+            wandb.log(wandb_log, step=epoch)
 
-            # Clear buffer unconditionally after each epoch's update phase
+            # Clear buffer after each epoch (PPO is on-policy)
             self.buffer.clear()
-            
-            # Progress monitoring
-            if (epoch + 1) % 10 == 0:
-                if len(self.episode_makespans) > 0:
-                    latest_makespan = self.episode_makespans[-1]
-                    latest_twt = self.episode_twts[-1]
-                    latest_objective = self.episode_objectives[-1]
-                    latest_reward = self.episode_rewards[-1]
-                    current_lr = self.optimizer.param_groups[0]['lr']
-                    alpha = self.env.alpha
-                    print(f"Epoch {epoch+1}/{self.epochs}: Makespan = {latest_makespan:.2f}, "
-                          f"TWT = {latest_twt:.2f}, Objective = {latest_objective:.2f}, "
-                          f"Reward = {latest_reward:.2f}, α = {alpha:.1f}, Policy Loss = {stats['policy_loss']:.4f}, "
-                          f"Value Loss = {stats['value_loss']:.4f}, LR = {current_lr:.6f}")
         
         pbar.close()
         
@@ -536,8 +455,7 @@ class GraphPPOTrainer:
         model_filename = f"model_{timestamp}.pth"
         self.save_model(model_filename)
         
-        if WANDB_AVAILABLE:
-            wandb.finish()
+        wandb.finish()
 
         return {
             'training_time': time.time() - start_time,
@@ -581,91 +499,3 @@ class GraphPPOTrainer:
             print(f"Model file {filepath} not found")
 
 
-def main():
-    """Main training script."""
-    parser = argparse.ArgumentParser(description='Train Graph PPO on FJSP')
-    
-    # Environment arguments
-    parser.add_argument('--data-path', type=str, required=True,
-                       help='Path to FJSP data file')
-    parser.add_argument('--data-type', type=str, default='dataset',
-                       choices=['dataset', 'simulation'],
-                       help='Type of data source')
-    
-    # Training arguments
-    parser.add_argument('--total-timesteps', type=int, default=1000000,
-                       help='Total timesteps to train')
-    parser.add_argument('--buffer-size', type=int, default=2048,
-                       help='Buffer size for PPO')
-    parser.add_argument('--batch-size', type=int, default=64,
-                       help='Batch size for training')
-    parser.add_argument('--learning-rate', type=float, default=3e-4,
-                       help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=0.99,
-                       help='Discount factor')
-    parser.add_argument('--gae-lambda', type=float, default=0.95,
-                       help='GAE lambda')
-    parser.add_argument('--clip-ratio', type=float, default=0.2,
-                       help='PPO clip ratio')
-    
-    # Network arguments
-    parser.add_argument('--hidden-dim', type=int, default=128,
-                       help='Hidden dimension for HGT network')
-    parser.add_argument('--num-hgt-layers', type=int, default=3,
-                       help='Number of HGT layers')
-    parser.add_argument('--num-heads', type=int, default=4,
-                       help='Number of attention heads')
-    
-    # Logging and saving
-    parser.add_argument('--log-interval', type=int, default=10,
-                       help='Logging interval')
-    parser.add_argument('--save-interval', type=int, default=100,
-                       help='Model saving interval')
-    parser.add_argument('--save-path', type=str, default='models/graph_ppo',
-                       help='Path to save models')
-    parser.add_argument('--use-tensorboard', action='store_true',
-                       help='Use TensorBoard logging')
-    parser.add_argument('--use-wandb', action='store_true',
-                       help='Use Weights & Biases logging')
-    
-    # Other arguments
-    parser.add_argument('--device', type=str, default='auto',
-                       choices=['auto', 'cpu', 'cuda'],
-                       help='Device to use')
-    parser.add_argument('--seed', type=int, default=None,
-                       help='Random seed')
-    
-    args = parser.parse_args()
-    
-    # Load problem data
-    print(f"Loading FJSP data from {args.data_path}")
-    problem_data = FlexibleJobShopDataHandler(
-        data_source=args.data_path,
-        data_type=args.data_type,
-        seed=args.seed
-    )
-    
-    print(f"Problem: {problem_data.num_jobs} jobs, "
-          f"{problem_data.num_machines} machines, "
-          f"{problem_data.num_operations} operations")
-    
-    # Initialize trainer with config-driven parameters
-    trainer = GraphPPOTrainer(
-        problem_data=problem_data,
-        hidden_dim=args.hidden_dim,
-        num_hgt_layers=args.num_hgt_layers,
-        num_heads=args.num_heads,
-        lr=args.learning_rate,
-        gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_ratio=args.clip_ratio,
-        device=args.device,
-        seed=args.seed
-    )
-    
-    # Start training (using the actual train method signature)
-    trainer.train(seed=args.seed)
-
-
-if __name__ == '__main__':
-    main()

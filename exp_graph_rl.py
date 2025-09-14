@@ -525,8 +525,39 @@ def main():
     parser.add_argument('--experiment', type=str, default='single',
                        choices=['single', 'brandimarte'],
                        help='Type of experiment to run')
+    
+    # Training arguments for direct training
+    parser.add_argument('--data-path', type=str, default=None,
+                       help='Path to FJSP data file for direct training')
+    parser.add_argument('--data-type', type=str, default='dataset',
+                       choices=['dataset', 'simulation'],
+                       help='Type of data source')
+    parser.add_argument('--epochs', type=int, default=None,
+                       help='Number of training epochs')
+    parser.add_argument('--episodes-per-epoch', type=int, default=None,
+                       help='Number of episodes per epoch')
+    parser.add_argument('--hidden-dim', type=int, default=None,
+                       help='Hidden dimension for HGT network')
+    parser.add_argument('--num-hgt-layers', type=int, default=None,
+                       help='Number of HGT layers')
+    parser.add_argument('--num-heads', type=int, default=None,
+                       help='Number of attention heads')
+    parser.add_argument('--learning-rate', type=float, default=None,
+                       help='Learning rate')
+    parser.add_argument('--device', type=str, default=None,
+                       choices=['auto', 'cpu', 'cuda'],
+                       help='Device to use')
+    parser.add_argument('--seed', type=int, default=None,
+                       help='Random seed')
+    
     args = parser.parse_args()
     
+    # If data-path is provided, run direct training
+    if args.data_path:
+        print("Running direct graph RL training...")
+        return run_direct_training(args)
+    
+    # Otherwise run experiments
     if args.experiment == 'single':
         print("Running single graph RL experiment...")
         results = run_single_graph_rl_experiment()
@@ -535,6 +566,41 @@ def main():
         results = run_brandimarte_graph_rl_experiment()
     
     print("\nGraph RL experiment completed successfully! 🎉")
+    return results
+
+
+def run_direct_training(args):
+    """Run direct training with command line arguments."""
+    from RL.graph_rl_trainer import GraphPPOTrainer
+    
+    # Load problem data
+    print(f"Loading FJSP data from {args.data_path}")
+    problem_data = FlexibleJobShopDataHandler(
+        data_source=args.data_path,
+        data_type=args.data_type,
+        seed=args.seed
+    )
+    
+    print(f"Problem: {problem_data.num_jobs} jobs, "
+          f"{problem_data.num_machines} machines, "
+          f"{problem_data.num_operations} operations")
+    
+    # Initialize trainer with command line parameters
+    trainer = GraphPPOTrainer(
+        problem_data=problem_data,
+        epochs=args.epochs,
+        episodes_per_epoch=args.episodes_per_epoch,
+        hidden_dim=args.hidden_dim,
+        num_hgt_layers=args.num_hgt_layers,
+        num_heads=args.num_heads,
+        lr=args.learning_rate,
+        device=args.device,
+        seed=args.seed
+    )
+    
+    # Start training
+    results = trainer.train(seed=args.seed)
+    print(f"Training completed. Model saved as: {results['model_filename']}")
     return results
 
 

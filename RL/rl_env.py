@@ -190,6 +190,11 @@ class RLEnv(gym.Env):
             weight = self.weights[job_id] if job_id < len(self.weights) else 1.0
             twt += weight * tardiness
 
+        # Normalize TWT by total weight to ensure consistent scaling
+        total_weight = sum(self.weights) if self.weights else 1.0
+        if total_weight > 0:
+            twt = twt / total_weight
+
         return {
             'makespan': makespan,
             'twt': twt,

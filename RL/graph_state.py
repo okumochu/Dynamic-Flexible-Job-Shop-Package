@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from torch_geometric.data import HeteroData
 from typing import Dict, List, Tuple, Optional
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 
 
 class GraphState:
@@ -55,7 +55,7 @@ class GraphState:
         self.hetero_data = self._build_initial_graph()
         self._update_ready_operations()
         # Update graph features to reflect the correct operation status after determining ready operations
-        self._update_graph_features()
+        self._update_graph_features(initialization=True)
     
     def _build_initial_graph(self) -> HeteroData:
         """
@@ -392,12 +392,12 @@ class GraphState:
         self._update_graph_features(op_idx, start_time, completion_time)
         self._update_dynamic_edges(op_idx, machine_idx)
     
-    def _update_graph_features(self, op_idx: int = None, start_time: float = None, completion_time: float = None):
+    def _update_graph_features(self, op_idx: int = None, start_time: float = None, completion_time: float = None, initialization: bool = False):
         """Update dynamic features in the heterogeneous graph"""
         current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
         # Update job features
-        self._update_job_features(op_idx, start_time, completion_time)
+        self._update_job_features(op_idx, start_time, completion_time, initialization)
         
         for op_id in range(self.num_operations):
             self.hetero_data['op'].x[op_id, 4] = self.operation_status[op_id]  # status (0: unscheduled, 1: scheduled)
@@ -443,7 +443,7 @@ class GraphState:
                 self.hetero_data['machine'].x[m_id, 4] = 0.0  # ready_ops_proc_time_max
                 self.hetero_data['machine'].x[m_id, 5] = 0.0  # ready_ops_proc_time_std
     
-    def _update_job_features(self, op_idx: int = None, start_time: float = None, completion_time: float = None):
+    def _update_job_features(self, op_idx: int = None, start_time: float = None, completion_time: float = None, initialization: bool = False):
         """
         Update dynamic job node features
         
@@ -453,18 +453,21 @@ class GraphState:
             op_idx: Operation index that was scheduled (optional)
             start_time: Start time of the operation (optional)
             completion_time: Completion time of the operation (optional)
+            initialization: If True, skip operation-specific updates (used during initialization)
         """
-        # Update job timing only for specific operations
-        job_id, op_position = self.problem_data.get_operation_info(op_idx)
-        job_operations = self.problem_data.get_job_operations(job_id)
-        
-        # Update job start time ONLY when first operation starts
-        if op_position == 0 and self.job_start_times[job_id] == 0:  # First operation AND not started yet
-            self.job_start_times[job_id] = start_time
-        
-        # Update job finished time ONLY when last operation finishes
-        if op_position == len(job_operations) - 1:  # Last operation in job
-            self.job_finished_times[job_id] = completion_time
+        # Handle initialization case - skip operation-specific updates
+        if not initialization and op_idx is not None:
+            # Update job timing only for specific operations
+            job_id, op_position = self.problem_data.get_operation_info(op_idx)
+            job_operations = self.problem_data.get_job_operations(job_id)
+            
+            # Update job start time ONLY when first operation starts
+            if op_position == 0 and self.job_start_times[job_id] == 0:  # First operation AND not started yet
+                self.job_start_times[job_id] = start_time
+            
+            # Update job finished time ONLY when last operation finishes
+            if op_position == len(job_operations) - 1:  # Last operation in job
+                self.job_finished_times[job_id] = completion_time
         
         current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
@@ -521,9 +524,10 @@ class GraphState:
         """
         Calculate Total Weighted Tardiness (TWT) for completed jobs.
         Utilizes raw job finished_time values for efficient calculation.
+        Normalized by total weight to ensure consistent scaling across different problem instances.
         
         Returns:
-            Total weighted tardiness value
+            Normalized total weighted tardiness value
         """
         total_weighted_tardiness = 0.0
         
@@ -536,7 +540,12 @@ class GraphState:
                 tardiness = max(0.0, job_completion_time - due_date)
                 total_weighted_tardiness += weight * tardiness
         
-        return total_weighted_tardiness
+        # Normalize by total weight to ensure consistent scaling
+        total_weight = self.problem_data.get_total_weight()
+        if total_weight > 0:
+            return total_weighted_tardiness / total_weight
+        else:
+            return 0.0
     
     
     def reset(self):
@@ -554,7 +563,7 @@ class GraphState:
         self.hetero_data = self._build_initial_graph()
         self._update_ready_operations()
         # Update graph features to reflect the correct operation status after determining ready operations
-        self._update_graph_features()
+        self._update_graph_features(initialization=True)
     
     def _update_dynamic_edges(self, scheduled_op_idx: int, machine_idx: int):
         """

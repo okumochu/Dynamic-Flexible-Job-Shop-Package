@@ -2,7 +2,7 @@ import gurobipy as gp
 from gurobipy import GRB
 from typing import Dict, List, Tuple, Optional
 import numpy as np
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 from itertools import permutations  # for disjunctive constraints
 
 class MILP:
@@ -221,7 +221,8 @@ class MILP:
         }
     
     def _calculate_twt(self):
-        """Calculate total weighted tardiness directly from tardiness variables."""
+        """Calculate total weighted tardiness directly from tardiness variables.
+        Normalized by total weight to ensure consistent scaling across different problem instances."""
         total_twt = 0
         for job_id in range(self.num_jobs):
             tardiness = self.T[job_id].X
@@ -229,7 +230,12 @@ class MILP:
                 weight = self.data_handler.get_job_weight(job_id)
                 total_twt += weight * tardiness
         
-        return total_twt
+        # Normalize by total weight to ensure consistent scaling
+        total_weight = self.data_handler.get_total_weight()
+        if total_weight > 0:
+            return total_twt / total_weight
+        else:
+            return 0.0
     
     def _extract_machine_schedule(self):
         """Extract machine schedule from solution."""

@@ -14,6 +14,7 @@ from RL.PPO.flat_agent import FlatAgent, HybridFlatAgent
 from RL.PPO.buffer import PPOBuffer, HybridPPOBuffer
 from RL.rl_env import RLEnv
 from RL.rl_env_continuius_idleness import RLEnvContinuousIdleness
+from config import config
 
 class FlatRLTrainer:
     """
@@ -35,7 +36,8 @@ class FlatRLTrainer:
                  project_name: Optional[str] = None,
                  run_name: Optional[str] = None,
                  device: str = 'auto',
-                 model_save_dir: str = 'result/flat_rl/model'):
+                 model_save_dir: str = 'result/flat_rl/model',
+                 seed: Optional[int] = None):
         
         self.env = env
         self.epochs = epochs
@@ -44,8 +46,9 @@ class FlatRLTrainer:
         self.model_save_dir = model_save_dir
         self.project_name = project_name
         self.run_name = run_name
+        self.seed = seed
         
-        # Add episode tracking
+        # Add episode tracking for current epoch only
         self.episode_makespans = []
         self.episode_twts = []
         self.episode_objectives = []
@@ -61,7 +64,8 @@ class FlatRLTrainer:
             gae_lambda=gae_lambda,
             clip_ratio=clip_ratio,
             entropy_coef=entropy_coef,
-            device=device
+            device=device,
+            seed=seed
         )
         
         # Create save directory
@@ -137,15 +141,14 @@ class FlatRLTrainer:
             self.episode_twts.append(final_info['twt'])
             self.episode_objectives.append(final_info['objective'])
             self.episode_rewards.append(episode_reward)
-            
-            # Log individual episode metrics for real-time monitoring
-            if wandb.run is not None:
-                wandb.log({
-                    "episode_performance/episode_objective": final_info['objective'],
-                    "episode_performance/episode_makespan": final_info['makespan'], 
-                    "episode_performance/episode_twt": final_info['twt'],
-                    "episode_performance/episode_reward": episode_reward
-                })
+        
+        return {
+            'episodes_completed': self.episodes_per_epoch,
+            'makespan_mean': float(np.mean(self.episode_makespans)),
+            'twt_mean': float(np.mean(self.episode_twts)),
+            'objective_mean': float(np.mean(self.episode_objectives)),
+            'reward_mean': float(np.mean(self.episode_rewards))
+        }
 
     def train(self, env_or_envs=None, test_environments=None, test_interval=50, seed: Optional[int] = None):
         """
@@ -206,7 +209,7 @@ class FlatRLTrainer:
 
         for epoch in pbar:
             # Collect rollout data
-            self.collect_rollout(env_or_envs, buffer, epoch)
+            collection_stats = self.collect_rollout(env_or_envs, buffer, epoch)
             
             # Update agent
             stats = self.agent.update(
@@ -215,11 +218,17 @@ class FlatRLTrainer:
                 train_v_iters=self.train_per_episode * self.episodes_per_epoch
             )
 
-            # Log training metrics
+            # Log all metrics together
             wandb_log = {
                 "policy_loss": stats["policy_loss"],
                 "value_loss": stats["value_loss"],
-                "entropy": stats["entropy"]
+                "entropy": stats["entropy"],
+                "total_epochs": epoch + 1,
+                "learning_rate": (self.agent.pi_lr + self.agent.v_lr) / 2,  # Average of pi and v learning rates
+                "performance/makespan_mean": collection_stats["makespan_mean"],
+                "performance/twt_mean": collection_stats["twt_mean"],
+                "performance/objective_mean": collection_stats["objective_mean"],
+                "performance/reward_mean": collection_stats["reward_mean"]
             }
             
             # Test generalization periodically
@@ -236,13 +245,17 @@ class FlatRLTrainer:
             # Log all metrics
             wandb.log(wandb_log)
 
+            # Clear buffer and episode lists after each epoch
             buffer.clear()
+            self.episode_makespans.clear()
+            self.episode_twts.clear()
+            self.episode_objectives.clear()
+            self.episode_rewards.clear()
         
         pbar.close()
         
         # Save model with timestamp
-        timestamp = time.strftime('%Y%m%d_%H%M')
-        model_filename = f"model_{timestamp}.pth"
+        model_filename = config.create_model_filename()
         self.save_model(model_filename)
         wandb.finish()
 
@@ -434,7 +447,7 @@ class HybridFlatRLTrainer:
         else:
             current_env = env_or_envs
 
-        for _ in range(self.episodes_per_epoch):
+        for episode in range(self.episodes_per_epoch):
             obs, _ = current_env.reset()
             obs = torch.tensor(obs, dtype=torch.float32, device=self.agent.device)
 
@@ -468,6 +481,14 @@ class HybridFlatRLTrainer:
                     "episode_performance/episode_twt": final_info['twt'],
                     "episode_performance/episode_reward": episode_reward,
                 })
+        
+        return {
+            'episodes_completed': self.episodes_per_epoch,
+            'makespan_mean': float(np.mean(self.episode_makespans)),
+            'twt_mean': float(np.mean(self.episode_twts)),
+            'objective_mean': float(np.mean(self.episode_objectives)),
+            'reward_mean': float(np.mean(self.episode_rewards))
+        }
 
     def train(self, env_or_envs=None, test_environments=None, test_interval=50, seed: Optional[int] = None):
         if env_or_envs is None:
@@ -516,19 +537,26 @@ class HybridFlatRLTrainer:
         start_time = time.time()
         pbar = tqdm(range(self.epochs), desc="Hybrid Flat Training")
         for epoch in pbar:
-            self.collect_rollout(env_or_envs, buffer, epoch)
+            collection_stats = self.collect_rollout(env_or_envs, buffer, epoch)
             stats = self.agent.update(
                 buffer,
                 train_pi_iters=self.train_per_episode * self.episodes_per_epoch,
                 train_v_iters=self.train_per_episode * self.episodes_per_epoch,
             )
 
+            # Log all metrics together
             wandb_log = {
                 "policy_loss": stats.get("policy_loss", 0.0),
                 "discrete_policy_loss": stats.get("discrete_policy_loss", 0.0),
                 "continuous_policy_loss": stats.get("continuous_policy_loss", 0.0),
                 "value_loss": stats.get("value_loss", 0.0),
                 "entropy": stats.get("entropy", 0.0),
+                "total_epochs": epoch + 1,
+                "learning_rate": (self.agent.pi_lr + self.agent.v_lr) / 2,  # Average of pi and v learning rates
+                "performance/makespan_mean": collection_stats["makespan_mean"],
+                "performance/twt_mean": collection_stats["twt_mean"],
+                "performance/objective_mean": collection_stats["objective_mean"],
+                "performance/reward_mean": collection_stats["reward_mean"]
             }
 
             if test_environments is not None and (epoch + 1) % test_interval == 0:
@@ -537,10 +565,13 @@ class HybridFlatRLTrainer:
 
             wandb.log(wandb_log)
             buffer.clear()
+            self.episode_makespans.clear()
+            self.episode_twts.clear()
+            self.episode_objectives.clear()
+            self.episode_rewards.clear()
 
         pbar.close()
-        timestamp = time.strftime('%Y%m%d_%H%M')
-        model_filename = f"model_{timestamp}.pth"
+        model_filename = config.create_model_filename()
         self.save_model(model_filename)
         wandb.finish()
         return {

@@ -3,7 +3,7 @@ Simple experiment to test MILP algorithm functionality.
 Tests performance and generates Gantt chart visualization.
 """
 
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 from MILP.model import MILP
 from utils.solution_utils import SolutionUtils
 import os

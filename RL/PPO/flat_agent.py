@@ -36,6 +36,7 @@ class FlatAgent:
         self.entropy_coef = entropy_coef
         self.target_kl = target_kl
         self.max_grad_norm = max_grad_norm
+        self.seed = seed
         self.policy = PolicyNetwork(input_dim, action_dim).to(self.device)
         self.value = ValueNetwork(input_dim).to(self.device)
         self.pi_lr = pi_lr

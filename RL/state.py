@@ -5,8 +5,8 @@ Handles state representation and observation generation
 
 import numpy as np
 from typing import Dict, Optional
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
-from benchmarks.static_benchmark.jobshop_components import Job
+from benchmarks.data_handler import FlexibleJobShopDataHandler
+from benchmarks.jobshop_components import Job
 
 class State:
     """

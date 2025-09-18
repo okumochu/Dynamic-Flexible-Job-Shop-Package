@@ -3,9 +3,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch_geometric.data import HeteroData, Batch
-from torch_geometric.nn import HGTConv, Linear, global_mean_pool, MLP
+from torch_geometric.nn import HGTConv, Linear, MLP, GlobalAttention
 from torch_geometric.nn.norm import LayerNorm as PygLayerNorm
+from torch_geometric.utils import softmax, scatter
 from typing import Dict, List, Tuple, Optional
+
+
+class _MultiTypeGlobalAttentionPooling(nn.Module):
+    """
+    Wrapper around three GlobalAttention layers (one per node type) returning
+    concatenated pooled embeddings of size 3*hidden_dim.
+    """
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        gate_nn_factory = lambda: nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1)
+        )
+        self.op_attn = GlobalAttention(gate_nn_factory())
+        self.machine_attn = GlobalAttention(gate_nn_factory())
+        self.job_attn = GlobalAttention(gate_nn_factory())
+
+    def forward(
+        self,
+        op_x: torch.Tensor, op_batch: torch.Tensor,
+        machine_x: torch.Tensor, machine_batch: torch.Tensor,
+        job_x: torch.Tensor, job_batch: torch.Tensor,
+        batch_size: int
+    ) -> torch.Tensor:
+        op_pool = self.op_attn(op_x, op_batch)  # [B, H]
+        machine_pool = self.machine_attn(machine_x, machine_batch)  # [B, H]
+        job_pool = self.job_attn(job_x, job_batch)  # [B, H]
+        return torch.cat([op_pool, machine_pool, job_pool], dim=1)  # [B, 3H]
 
 
 class HGTPolicy(nn.Module):
@@ -53,6 +83,10 @@ class HGTPolicy(nn.Module):
         
         # HGT layers for message passing (hierarchical structure)
         self.hgt_layers = nn.ModuleList()
+        # Per-layer LayerNorm modules for residual stabilization
+        self.per_layer_norms = nn.ModuleList()
+        # Dropout applied after residual addition
+        self.residual_dropout = nn.Dropout(dropout)
         metadata = (
             ['op', 'machine', 'job'],
             [
@@ -81,13 +115,21 @@ class HGTPolicy(nn.Module):
                     heads=num_heads
                 )
             )
+            # Create one LayerNorm per node type per layer
+            self.per_layer_norms.append(
+                nn.ModuleDict({
+                    'op': PygLayerNorm(hidden_dim),
+                    'machine': PygLayerNorm(hidden_dim),
+                    'job': PygLayerNorm(hidden_dim)
+                })
+            )
         
         # Policy head: input [op_emb, machine_emb, global_embedding] -> scalar
         # Input dim = hidden_dim (op) + hidden_dim (machine) + 3*hidden_dim (global) = 5*hidden_dim
         self.policy_head = MLP(
             channel_list=[5 * hidden_dim, hidden_dim, hidden_dim // 2, 1],
             dropout=dropout,
-            act='relu',
+            act='tanh',
             norm=None
         )
         
@@ -95,17 +137,21 @@ class HGTPolicy(nn.Module):
         self.value_head = MLP(
             channel_list=[3 * hidden_dim, hidden_dim, 1],
             dropout=dropout,
-            act='relu',
+            act='tanh',
             norm=None
         )
         
+        # Separate attention pooling for actor and critic using GlobalAttention
+        self.actor_pool = _MultiTypeGlobalAttentionPooling(hidden_dim)
+        self.critic_pool = _MultiTypeGlobalAttentionPooling(hidden_dim)
+
         # Layer normalization - use PyG LayerNorm
         self.op_norm = PygLayerNorm(hidden_dim)
         self.machine_norm = PygLayerNorm(hidden_dim)
         self.job_norm = PygLayerNorm(hidden_dim)
     
     
-    def forward(self, obs, valid_actions=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, obs, valid_actions=None, use_batch=False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass that always works with batches internally.
         
@@ -113,22 +159,23 @@ class HGTPolicy(nn.Module):
             obs: Either a single HeteroData graph or a Batch containing multiple graphs
             valid_actions: For single graph: List of valid (operation, machine) pairs
                           For batch: List of valid action pairs for each graph in the batch
+            use_batch: If True, treat obs as already in batch format and use directly
             
         Returns:
             For single graph: (action_logits, value)
             For batch: (batch_action_logits, batch_values)
         """
-        # Always convert to batch format for consistent processing
-        if isinstance(obs, HeteroData):
+        # Use batch format directly if use_batch is True, otherwise convert single graph to batch
+        if use_batch:
+            # Input is already in batch format - use directly
+            batch = obs
+            batch_valid_action_pairs = valid_actions
+            is_single_graph = False
+        else:
             # Single graph case - convert to batch
             batch = Batch.from_data_list([obs])
             batch_valid_action_pairs = [valid_actions] if valid_actions else [[]]
             is_single_graph = True
-        else:
-            # Already a batch
-            batch = obs
-            batch_valid_action_pairs = valid_actions
-            is_single_graph = False
         
         # Process the batch
         batch_action_logits, batch_values = self._process_batch(batch, batch_valid_action_pairs)
@@ -192,9 +239,16 @@ class HGTPolicy(nn.Module):
         for edge_type in batch.edge_types:
             edge_index_dict[edge_type] = batch[edge_type].edge_index
         
-        # Apply HGT layers
-        for hgt_layer in self.hgt_layers:
-            x_dict = hgt_layer(x_dict, edge_index_dict)
+        # Apply HGT layers with residual connections and per-layer LayerNorm
+        for layer_index, hgt_layer in enumerate(self.hgt_layers):
+            residual_dict = {k: v for k, v in x_dict.items()}
+            out_dict = hgt_layer(x_dict, edge_index_dict)
+            # Residual add + dropout + norm per node type
+            x_dict = {
+                'op': self.per_layer_norms[layer_index]['op'](self.residual_dropout(out_dict['op'] + residual_dict['op'])),
+                'machine': self.per_layer_norms[layer_index]['machine'](self.residual_dropout(out_dict['machine'] + residual_dict['machine'])),
+                'job': self.per_layer_norms[layer_index]['job'](self.residual_dropout(out_dict['job'] + residual_dict['job']))
+            }
         
         # Get final embeddings
         final_op_embeddings = x_dict['op']  # [total_ops_across_batch, hidden_dim]
@@ -202,9 +256,6 @@ class HGTPolicy(nn.Module):
         final_job_embeddings = x_dict['job']  # [total_jobs_across_batch, hidden_dim]
         
         # Split embeddings back to individual graphs using batch indices
-        op_batch_slices = []
-        machine_batch_slices = []
-        
         # Get batch information (using index to split the mixed embeddings across graphs)
         # e.g. op_batch = [0, 0, 0, 1, 1], it means the first 3 ops belong to the first graph, and the last 2 ops belong to the second graph
         op_batch = batch['op'].batch  # [total_ops_across_batch]
@@ -212,52 +263,76 @@ class HGTPolicy(nn.Module):
         job_batch = batch['job'].batch  # [total_jobs_across_batch]
         batch_size = batch.num_graphs
         
-        # Vectorized global pooling across the whole batch
-        # Graph 0: mean([op0_emb, op1_emb, op2_emb]) -> [1, 64]
-        # Graph 1: mean([op3_emb, op4_emb]) -> [1, 64]
-        # Result: [2, 64] - one pooled embedding per graph
-        op_pool_batched = global_mean_pool(final_op_embeddings, op_batch) #[batch_size, hidden_dim]
-        machine_pool_batched = global_mean_pool(final_machine_embeddings, machine_batch) #[batch_size, hidden_dim]
-        job_pool_batched = global_mean_pool(final_job_embeddings, job_batch) #[batch_size, hidden_dim]
-        global_embedding_batched = torch.cat([op_pool_batched, machine_pool_batched, job_pool_batched], dim=1) #[batch_size, 3*hidden_dim]
+        # Attention-based global pooling (separate modules for actor and critic)
+        actor_global_embedding_batched = self.actor_pool(
+            final_op_embeddings, op_batch,
+            final_machine_embeddings, machine_batch,
+            final_job_embeddings, job_batch,
+            batch_size
+        )  # [batch_size, 3*hidden_dim]
+
+        critic_global_embedding_batched = self.critic_pool(
+            final_op_embeddings, op_batch,
+            final_machine_embeddings, machine_batch,
+            final_job_embeddings, job_batch,
+            batch_size
+        )  # [batch_size, 3*hidden_dim]
         
-        # Split embeddings by graph
-        for graph_idx in range(batch_size):
-            op_mask = (op_batch == graph_idx)
-            machine_mask = (machine_batch == graph_idx)
-            
-            # get the embeddings of the ops in the graph 
-            # i.e. op_batch_slices = [[graph0_op0_emb, graph0_op1_emb, graph0_op2_emb], [graph1_op3_emb, graph1_op4_emb]]
-            op_batch_slices.append(final_op_embeddings[op_mask])
-            machine_batch_slices.append(final_machine_embeddings[machine_mask])
+        # Compute action logits for each graph in a vectorized manner
+        device = final_op_embeddings.device
         
-        # Compute action logits for each graph
-        batch_action_logits = []
-        batch_values = []
-        
-        for graph_idx in range(batch_size):
-            graph_op_embeddings = op_batch_slices[graph_idx]  # [num_ops_in_graph, hidden_dim]
-            graph_machine_embeddings = machine_batch_slices[graph_idx]  # [num_machines_in_graph, hidden_dim]
-            valid_pairs = batch_valid_action_pairs[graph_idx]
-            
-            # Compute action logits for this graph (vectorized where possible)
-            op_indices = torch.tensor([pair[0] for pair in valid_pairs], dtype=torch.long, device=graph_op_embeddings.device)
-            machine_indices = torch.tensor([pair[1] for pair in valid_pairs], dtype=torch.long, device=graph_machine_embeddings.device)
-            
-            # Extract embeddings for valid pairs
-            valid_op_embeds = graph_op_embeddings[op_indices]  # [num_valid_actions, hidden_dim]
-            valid_machine_embeds = graph_machine_embeddings[machine_indices]  # [num_valid_actions, hidden_dim]
-            
-            # Concatenate and compute logits in batch (include raw global embedding)
-            per_graph_global = global_embedding_batched[graph_idx]  # [3*hidden_dim]
-            broadcast_global = per_graph_global.unsqueeze(0).expand(valid_op_embeds.size(0), -1)
-            combined_embeddings = torch.cat([valid_op_embeds, valid_machine_embeds, broadcast_global], dim=1)  # [num_valid_actions, 5*hidden_dim]
-            action_logits = self.policy_head(combined_embeddings).squeeze(-1)  # [num_valid_actions]
-            
-            batch_action_logits.append(action_logits)
+        # Step 1: Get action counts and node offsets
+        num_actions_per_graph = torch.tensor(
+            [len(pairs) for pairs in batch_valid_action_pairs],
+            device=device,
+            dtype=torch.long
+        )
+        op_offsets = batch['op'].ptr[:-1]
+        machine_offsets = batch['machine'].ptr[:-1]
                 
-        # Critic: values from global embeddings
-        batch_values = self.value_head(global_embedding_batched).squeeze(-1)  # [batch_size]
+        # Step 2: Create global action indices
+        global_op_indices = torch.cat([
+            (torch.tensor([pair[0] for pair in pairs], device=device, dtype=torch.long) + op_offsets[i])
+            for i, pairs in enumerate(batch_valid_action_pairs)
+        ])
+        global_machine_indices = torch.cat([
+            (torch.tensor([pair[1] for pair in pairs], device=device, dtype=torch.long) + machine_offsets[i])
+            for i, pairs in enumerate(batch_valid_action_pairs)
+        ])
+        
+        # Step 3: Gather all embeddings
+        valid_op_embeds = final_op_embeddings[global_op_indices]
+        valid_machine_embeds = final_machine_embeddings[global_machine_indices]
+        
+        # Step 4: Broadcast global context per action
+        broadcast_global = torch.repeat_interleave(
+            actor_global_embedding_batched,
+            num_actions_per_graph,
+            dim=0
+        )
+        
+        # Step 5: Compute all logits at once
+        combined_embeddings = torch.cat(
+            [valid_op_embeds, valid_machine_embeds, broadcast_global], dim=1
+        )
+        all_logits = self.policy_head(combined_embeddings).squeeze(-1)
+
+        # LayerNorm over action logits per graph to prevent softmax saturation
+        if torch.numel(all_logits) > 0:
+            graph_ids = torch.repeat_interleave(torch.arange(batch_size, device=device), num_actions_per_graph)
+            means = scatter(all_logits, graph_ids, dim=0, reduce='mean')
+            mean_per_action = means[graph_ids]
+            sq_means = scatter(all_logits * all_logits, graph_ids, dim=0, reduce='mean')
+            var = torch.clamp(sq_means - means * means, min=1e-6)
+            std = torch.sqrt(var)
+            std_per_action = std[graph_ids]
+            all_logits = (all_logits - mean_per_action) / std_per_action
+        
+        # Step 6: Split logits back into list per graph
+        batch_action_logits = list(torch.split(all_logits, num_actions_per_graph.tolist()))
+        
+        # Critic: values from critic-specific global embeddings
+        batch_values = self.value_head(critic_global_embedding_batched).squeeze(-1)  # [batch_size]
         
         return batch_action_logits, batch_values    
 

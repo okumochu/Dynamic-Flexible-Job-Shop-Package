@@ -11,17 +11,17 @@ leverages the existing PPO infrastructure.
 import os
 import time
 import random
-import argparse
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch_geometric.data import Batch
 from typing import Dict, List, Tuple, Optional
+from config import config
 import wandb
 
 # Import project modules
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 from RL.graph_rl_env import GraphRlEnv
 from RL.PPO.graph_network import HGTPolicy, GraphPPOBuffer
 from RL.PPO.networks import PPOUpdater
@@ -95,7 +95,7 @@ class GraphPPOTrainer:
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         
-        # Episode tracking like flat_rl_trainer
+        # Episode tracking for current epoch only
         self.episode_makespans = []
         self.episode_twts = []
         self.episode_objectives = []
@@ -142,16 +142,14 @@ class GraphPPOTrainer:
         print(f"Policy network parameters: {sum(p.numel() for p in self.policy.parameters()):,}")
         
         # Initialize optimizer with better defaults
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr, eps=1e-5)
+        self.optimizer = torch.optim.AdamW(self.policy.parameters(), lr=lr)
         
         # Initialize buffer - use upper bound: max_operations * episodes_per_epoch
         # Buffer will be cleared after each update (PPO is on-policy)
         max_steps_per_episode = self.env.problem_data.num_operations
+        # Initialize buffer for storing experiences
         buffer_size = max_steps_per_episode * self.episodes_per_epoch
         self.buffer = GraphPPOBuffer(buffer_size, self.device)
-        
-        # Learning rate scheduler for better convergence
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=max(1, self.epochs//4), gamma=0.8)
         
         # Create save directory
         os.makedirs(model_save_dir, exist_ok=True)
@@ -201,20 +199,20 @@ class GraphPPOTrainer:
         
         for episode in range(self.episodes_per_epoch):
             # Reset environment for new episode
-            obs, info = self.env.reset()
-            obs = obs.to(self.device)
+            self.env.reset()
             
             episode_reward = 0
             episode_steps = 0
             
             # Run episode until completion
             while not self.env.graph_state.is_done():
-                # Get valid actions from environment info (from last reset or step)
-                env_valid_actions = info['valid_actions']
+                # Get current observation and valid actions from environment state
+                current_obs = self.env.graph_state.get_observation().to(self.device)
+                env_valid_actions = self.env.graph_state.get_valid_actions()
                 
                 # Get action from policy - always produces valid action logits
                 with torch.no_grad():
-                    action_logits, value = self.policy(obs, env_valid_actions)
+                    action_logits, value = self.policy(current_obs, env_valid_actions)
                     
                     # Create distribution and sample action
                     dist = Categorical(logits=action_logits)
@@ -231,7 +229,7 @@ class GraphPPOTrainer:
                 
                 # Store experience in buffer (keep on device for efficiency)
                 buffer.add(
-                    obs=obs,  # Keep on device
+                    obs=current_obs,  # Use current observation, not stale obs
                     action=action_idx.item(),
                     reward=reward,
                     value=value.item(),
@@ -243,7 +241,6 @@ class GraphPPOTrainer:
                 # Update episode statistics
                 episode_reward += reward
                 episode_steps += 1                    
-                obs = next_obs.to(self.device)
             
             # Track completion
             epoch_episodes_completed += 1
@@ -263,10 +260,14 @@ class GraphPPOTrainer:
             self.episode_objectives.append(objective)
             self.episode_rewards.append(episode_reward)
         
-        # Return collection statistics
+        # Return collection statistics with epoch mean performance metrics
         return {
             'episodes_completed': epoch_episodes_completed,
-            'total_steps': epoch_total_steps
+            'total_steps': epoch_total_steps,
+            'makespan_mean': float(np.mean(self.episode_makespans)),
+            'twt_mean': float(np.mean(self.episode_twts)),
+            'objective_mean': float(np.mean(self.episode_objectives)),
+            'reward_mean': float(np.mean(self.episode_rewards))
         }
     
     def update_policy(self) -> Dict:
@@ -302,7 +303,6 @@ class GraphPPOTrainer:
         # Multiple PPO updates on the same data (train_per_episode times)
         for _ in range(self.train_per_episode):
             # Process batch in order (no shuffling for size-variant action spaces)
-            # Each step has different valid action pairs, so shuffling breaks the sequence
             
             # Get batch data in original order
             batch_obs = batch['observations']
@@ -316,7 +316,7 @@ class GraphPPOTrainer:
             batch_graphs = Batch.from_data_list([obs.to(self.device) for obs in batch_obs])
             
             # Forward pass through the policy network
-            batch_action_logits, batch_values = self.policy.forward(batch_graphs, batch_valid_pairs)
+            batch_action_logits, batch_values = self.policy.forward(batch_graphs, batch_valid_pairs, use_batch=True)
             
             # Process results for each graph in the batch
             policy_losses = []
@@ -336,6 +336,11 @@ class GraphPPOTrainer:
                     new_log_prob.unsqueeze(0), batch_old_log_probs[i].unsqueeze(0), 
                     batch_advantages[i].unsqueeze(0), self.clip_ratio
                 )
+
+                # Scale loss by number of valid actions to normalize learning across variable action spaces
+                K_t = max(2, len(batch_valid_pairs[i]))  # avoid log(1) or log(0)
+                scaling_weight = 1.0 / float(np.log(K_t))
+                policy_loss = policy_loss * scaling_weight
                 
                 # Value loss
                 value_loss = F.mse_loss(value, batch_returns[i])
@@ -360,8 +365,6 @@ class GraphPPOTrainer:
             
             self.optimizer.step()
             
-            # Update learning rate scheduler
-            self.scheduler.step()
             
             # Accumulate statistics
             total_policy_loss += policy_loss.item()
@@ -424,35 +427,33 @@ class GraphPPOTrainer:
             
             # Learning rate is updated inside update_policy()
 
-            # Log training metrics
+            # Log all metrics together
             wandb_log = {
-                "training/policy_loss": stats["policy_loss"],
-                "training/value_loss": stats["value_loss"],
-                "training/total_episodes": len(self.episode_makespans),
-                "training/learning_rate": self.optimizer.param_groups[0]['lr']
+                "policy_loss": stats["policy_loss"],
+                "value_loss": stats["value_loss"],
+                "total_epochs": epoch + 1,
+                "learning_rate": self.optimizer.param_groups[0]['lr'],
+                "performance/makespan_mean": collection_stats["makespan_mean"],
+                "performance/twt_mean": collection_stats["twt_mean"],
+                "performance/objective_mean": collection_stats["objective_mean"],
+                "performance/reward_mean": collection_stats["reward_mean"],
+                "performance/alpha": self.env.alpha
             }
-            
-            # Add latest episode performance metrics if available
-            if collection_stats['episodes_completed'] > 0 and len(self.episode_makespans) > 0:
-                wandb_log.update({
-                    "performance/episode_makespan": self.episode_makespans[-1],
-                    "performance/episode_twt": self.episode_twts[-1],
-                    "performance/episode_objective": self.episode_objectives[-1],
-                    "performance/episode_reward": self.episode_rewards[-1],
-                    "performance/alpha": self.env.alpha  # Log the multi-objective weight
-                })
             
             # Log all metrics with epoch as step
             wandb.log(wandb_log, step=epoch)
 
-            # Clear buffer after each epoch (PPO is on-policy)
+            # Clear buffer and episode lists after each epoch (PPO is on-policy)
             self.buffer.clear()
+            self.episode_makespans.clear()
+            self.episode_twts.clear()
+            self.episode_objectives.clear()
+            self.episode_rewards.clear()
         
         pbar.close()
         
         # Save model with timestamp
-        timestamp = time.strftime('%Y%m%d_%H%M')
-        model_filename = f"model_{timestamp}.pth"
+        model_filename = config.create_model_filename()
         self.save_model(model_filename)
         
         wandb.finish()
@@ -474,7 +475,6 @@ class GraphPPOTrainer:
         torch.save({
             'policy_state_dict': self.policy.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
             'config': {
                 'hidden_dim': self.policy.hidden_dim,
                 'num_hgt_layers': self.policy.num_hgt_layers,
@@ -492,8 +492,6 @@ class GraphPPOTrainer:
             checkpoint = torch.load(filepath, map_location=self.device)
             self.policy.load_state_dict(checkpoint['policy_state_dict'])
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if 'scheduler_state_dict' in checkpoint:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             print(f"Graph RL model loaded from {filepath}")
         else:
             print(f"Model file {filepath} not found")

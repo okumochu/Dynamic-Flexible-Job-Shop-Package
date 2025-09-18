@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from torch_geometric.data import HeteroData
 
 from RL.graph_state import GraphState
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 
 
 class GraphRlEnv(gym.Env):

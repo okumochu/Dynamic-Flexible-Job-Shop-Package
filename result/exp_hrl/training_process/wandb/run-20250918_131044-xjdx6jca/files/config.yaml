@@ -1,0 +1,84 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            ksfi00k9p9jakfg7hrhh2lk53ahcwmjy:
+                codePath: exp_hrl.py
+                codePathLocal: exp_hrl.py
+                cpu_count: 32
+                cpu_count_logical: 64
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "588412764160"
+                        used: "401959002112"
+                email: okumochu55@gmail.com
+                executable: /home/r13725046okumo/miniconda3/envs/dfjs/bin/python
+                git:
+                    commit: 1302487422687d5a03682a2eaf2f1ab1ee3f20e0
+                    remote: git@github.com:okumochu/Dynamic-Flexible-Job-Shop-Package.git
+                gpu: Quadro RTX 6000
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Turing
+                      cudaCores: 4608
+                      memoryTotal: "25769803776"
+                      name: Quadro RTX 6000
+                      uuid: GPU-56f43da4-1deb-c532-3a59-75303aabf3d2
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-41575f01-33f8-a380-7e12-d3927e3fc83c
+                host: ubuntu-ProLiant-DL380-Gen10
+                memory:
+                    total: "134792536064"
+                os: Linux-6.11.0-26-generic-x86_64-with-glibc2.39
+                program: /home/r13725046okumo/project/Dynamic-Flexible-Job-Shop-Package/exp_hrl.py
+                python: CPython 3.12.11
+                root: result/exp_hrl/training_process
+                startedAt: "2025-09-18T05:10:44.989902Z"
+                writerId: ksfi00k9p9jakfg7hrhh2lk53ahcwmjy
+        m: []
+        python_version: 3.12.11
+        t:
+            "1":
+                - 1
+                - 105
+            "2":
+                - 1
+                - 105
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.12.11
+            "5": 0.21.0
+            "12": 0.21.0
+            "13": linux-x86_64
+entropy_coef:
+    value: 0.01
+episodes_per_epoch:
+    value: 20
+epochs:
+    value: 300
+gamma_manager:
+    value: 0.9999
+gamma_worker:
+    value: 0.999
+goal_dim:
+    value: 16
+goal_duration:
+    value: 16
+goal_duration_ratio:
+    value: 12
+intrinsic_reward_scale:
+    value: 0.5
+latent_dim:
+    value: 128
+manager_lr:
+    value: 0.0002
+train_per_episode:
+    value: 4
+worker_lr:
+    value: 0.0003

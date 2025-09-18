@@ -9,7 +9,7 @@ matplotlib.use('Agg')  # non-interactive backend
 import matplotlib.pyplot as plt
 
 from RL.graph_state import GraphState
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 from config import config
 
 

@@ -22,9 +22,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Import project modules
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 from RL.graph_rl_env import GraphRlEnv
 from RL.graph_rl_trainer import GraphPPOTrainer
+from RL.PPO.graph_network import HGTPolicy
+from utils.policy_utils import evaluate_graph_policy
 from config import config
 
 
@@ -41,7 +43,9 @@ class BenchmarkEvaluator:
             model_path: Path to the trained model file
         """
         self.model_path = model_path
-        self.trainer = None
+        self.policy = None
+        self.model_config = None
+        self.device = None
         
         # Optimal/Best-known objective values for benchmark instances
         # Based on literature and research papers
@@ -89,37 +93,45 @@ class BenchmarkEvaluator:
         self.results = []
         
     def load_model(self):
-        """Load the trained model."""
+        """Load the trained model using the existing trainer infrastructure."""
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
-            
-        # Create a dummy trainer to load the model
-        # We'll use a small dummy problem for initialization
-        dummy_params = {
-            'num_jobs': 2, 'num_machines': 2, 'operation_lb': 1, 'operation_ub': 2,
-            'processing_time_lb': 1, 'processing_time_ub': 5, 
-            'compatible_machines_lb': 1, 'compatible_machines_ub': 2,
-            'TF': 0.4, 'RDD': 0.8, 'seed': 42
-        }
-        dummy_data = FlexibleJobShopDataHandler(
-            data_source=dummy_params, 
-            data_type='simulation',
-            TF=dummy_params['TF'],
-            RDD=dummy_params['RDD'],
-            seed=dummy_params['seed']
+        
+        # Load the checkpoint to get model configuration
+        checkpoint = torch.load(self.model_path, map_location='cpu')
+        self.model_config = checkpoint.get('config', {})
+        
+        # Set device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Create a dummy data handler for model initialization
+        # We'll use a minimal instance just to initialize the model
+        dummy_data_handler = FlexibleJobShopDataHandler(
+            data_source="benchmarks/brandimarte/mk01.txt",  # Use a small instance
+            data_type="dataset",
+            TF=config.simulation_params['TF'],
+            RDD=config.simulation_params['RDD'],
+            seed=config.simulation_params['seed']
         )
         
-        # Use config for trainer parameters (GraphPPOTrainer will use config defaults when None is passed)
-        self.trainer = GraphPPOTrainer(
-            problem_data=dummy_data,
-            epochs=1,  # Dummy values for evaluation
-            episodes_per_epoch=1,
-            train_per_episode=1
+        # Create trainer instance to get the model
+        trainer = GraphPPOTrainer(
+            problem_data=dummy_data_handler,
+            hidden_dim=self.model_config.get('hidden_dim', 64),
+            num_hgt_layers=self.model_config.get('num_hgt_layers', 2),
+            num_heads=self.model_config.get('num_heads', 4),
+            device=self.device
         )
         
-        self.trainer.load_model(self.model_path)
-        self.trainer.policy.eval()
+        # Load the model state
+        trainer.policy.load_state_dict(checkpoint['policy_state_dict'])
+        self.policy = trainer.policy
+        self.policy.eval()  # Set to evaluation mode
+        
         logger.info(f"Model loaded successfully from {self.model_path}")
+        logger.info(f"Architecture: hidden_dim={self.model_config.get('hidden_dim', 64)}, "
+                   f"hgt_layers={self.model_config.get('num_hgt_layers', 2)}, "
+                   f"heads={self.model_config.get('num_heads', 4)}")
     
     def evaluate_instance(self, dataset_path: str, instance_name: str, optimal_value: float = None) -> Dict[str, Any]:
         """
@@ -146,9 +158,6 @@ class BenchmarkEvaluator:
             # Create environment
             env = GraphRlEnv(data_handler)
             
-            # Update trainer's environment to match the current instance
-            self.trainer.env = env
-            
             # Run evaluation episodes
             num_episodes = 3  # Multiple episodes for robustness
             episode_makespans = []
@@ -163,10 +172,17 @@ class BenchmarkEvaluator:
                 done = False
                 
                 while not done and episode_length < data_handler.num_operations * 3:  # Prevent infinite loops
-                    obs = obs.to(self.trainer.device)
+                    obs = obs.to(self.device)
+                    
+                    # Get valid actions from the environment
+                    valid_actions = env.graph_state.get_valid_actions()
+                    
+                    if not valid_actions:
+                        logger.warning(f"No valid actions for {instance_name}, episode {episode}")
+                        break
                     
                     with torch.no_grad():
-                        action_logits, value, action_mask, valid_pairs = self.trainer.policy(obs)
+                        action_logits, value = self.policy(obs, valid_actions)
                         
                         if len(action_logits) == 0:
                             logger.warning(f"No valid actions for {instance_name}, episode {episode}")
@@ -176,8 +192,8 @@ class BenchmarkEvaluator:
                         action_idx = torch.argmax(action_logits).item()
                         
                         # Convert to environment action
-                        if action_idx < len(valid_pairs):
-                            target_pair = valid_pairs[action_idx]
+                        if action_idx < len(valid_actions):
+                            target_pair = valid_actions[action_idx]
                             env_action = None
                             for env_action_idx, pair in env.action_to_pair_map.items():
                                 if pair == target_pair:
@@ -203,7 +219,7 @@ class BenchmarkEvaluator:
                 # Extract final metrics
                 is_valid_completion = env.graph_state.is_done()
                 final_makespan = env.graph_state.get_makespan() if is_valid_completion else float('inf')
-                total_twt = env._calculate_total_weighted_tardiness() if is_valid_completion else float('inf')
+                total_twt = env.graph_state.get_total_weighted_tardiness() if is_valid_completion else float('inf')
                 alpha = env.alpha
                 objective = (1 - alpha) * final_makespan + alpha * total_twt if is_valid_completion else float('inf')
                 
@@ -273,7 +289,7 @@ class BenchmarkEvaluator:
         """Evaluate all Brandimarte instances."""
         logger.info("🔍 Evaluating Brandimarte instances...")
         
-        brandimarte_dir = "benchmarks/static_benchmark/datasets/brandimarte"
+        brandimarte_dir = "benchmarks/brandimarte"
         results = []
         
         for instance_file in sorted(os.listdir(brandimarte_dir)):
@@ -296,7 +312,7 @@ class BenchmarkEvaluator:
         """
         logger.info("🔍 Evaluating Hurink instances...")
         
-        hurink_base_dir = "benchmarks/static_benchmark/datasets/hurink"
+        hurink_base_dir = "benchmarks/hurink"
         results = []
         
         for category in ['edata', 'rdata', 'vdata']:
@@ -480,7 +496,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Check if model exists
+    # Check if model exists (only if not showing help)
     if not os.path.exists(args.model_path):
         logger.error(f"Model file not found: {args.model_path}")
         logger.info("Please train a model first using: python exp_graph_rl.py --experiment single")

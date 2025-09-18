@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from RL.rl_env import RLEnv
 from RL.hierarchical_rl_trainer import HierarchicalRLTrainer
-from benchmarks.static_benchmark.data_handler import FlexibleJobShopDataHandler
+from benchmarks.data_handler import FlexibleJobShopDataHandler
 import wandb
-from utils.policy_utils import showcase_hierarchical_policy, create_gantt_chart, evaluate_hierarchical_policy, visualize_policy_schedule
+# Evaluation utilities removed - only training code kept
 from config import config
 
 
@@ -70,71 +70,17 @@ def run_hierarchical_rl_experiment():
         train_per_episode=hrl_params['train_per_episode'],
         device=hrl_params['device'],
         project_name=exp_config['wandb_project'],
-        model_save_dir=result_dir
+        run_name=hrl_params['wandb_run_name'],
+        model_save_dir=result_dir,
+        seed=hrl_params['seed']
     )
     
     print(f"Starting hierarchical training for {hrl_params['epochs']} epochs...")
-    results = trainer.train()
+    results = trainer.train(seed=hrl_params['seed'])
     print("Hierarchical training complete.")
 
     print(f"Training time: {results['training_time']:.2f} seconds")
     print(f"Model saved in {result_dir}, wandb logs in {result_dir}.")
-
-    # Deterministic evaluation on training environment
-    print("\nEvaluating trained hierarchical policy (deterministic) on training environment...")
-    model_path = os.path.join(result_dir, results['model_filename'])
-    evaluation_result = evaluate_hierarchical_policy(model_path, env, num_episodes=1)
-    print(f"Final objective: {evaluation_result.get('objective', 0):.2f}")
-    print(f"Final makespan: {evaluation_result.get('makespan', 0):.2f}")
-    print(f"Final TWT: {evaluation_result.get('twt', 0):.2f}")
-
-    # Save evaluation summary CSV similar format
-    import pandas as pd
-    os.makedirs(result_dir, exist_ok=True)
-    reward_label = "Dense" if hrl_params['use_reward_shaping'] else "Sparse"
-    run_name_hrl = trainer.run_name if hasattr(trainer, 'run_name') and trainer.run_name else 'hrl'
-    df = pd.DataFrame([
-        {
-            'method': f"Hierarchical RL ({reward_label})",
-            'objective': evaluation_result.get('objective', 0.0),
-            'makespan': evaluation_result.get('makespan', 0.0),
-            'twt': evaluation_result.get('twt', 0.0),
-            'run_name': run_name_hrl
-        }
-    ])
-    csv_path = os.path.join(result_dir, 'hrl_results.csv')
-    df.to_csv(csv_path, index=False)
-    print(f"Saved evaluation CSV to {csv_path}")
-    
-    print("\nHierarchical Evaluation Results:")
-    if 'avg_reward' in evaluation_result:
-        print(f"  Average Reward: {evaluation_result['avg_reward']:.2f} ± {evaluation_result['std_reward']:.2f}")
-        print(f"  Average Makespan: {evaluation_result['avg_makespan']:.2f} ± {evaluation_result['std_makespan']:.2f}")
-        print(f"  Average TWT: {evaluation_result['avg_twt']:.2f} ± {evaluation_result['std_twt']:.2f}")
-    else:
-        print(f"  Single Episode - Reward: {evaluation_result['episode_reward']:.2f}")
-        print(f"  Single Episode - Makespan: {evaluation_result['makespan']:.2f}")
-        print(f"  Single Episode - TWT: {evaluation_result['twt']:.2f}")
-    
-    # Visualize using policy_utils
-    print("Creating Gantt chart using policy_utils...")
-    gantt_save_path_evaluation = os.path.join(result_dir, "hierarchical_gantt_evaluation.png")
-    visualize_policy_schedule(evaluation_result, env, save_path=gantt_save_path_evaluation)
-    
-    # Also showcase using hierarchical policy showcase function
-    print("Creating Gantt chart using hierarchical showcase function...")
-    gantt_save_path_showcaser = os.path.join(result_dir, "hierarchical_gantt_showcase.png")
-    showcaser_result = showcase_hierarchical_policy(model_path=result_dir, env=env)
-    
-    # Create Gantt chart separately
-    create_gantt_chart(showcaser_result, save_path=gantt_save_path_showcaser, title_suffix="Hierarchical RL")
-    
-    print("\nHierarchical Showcase Results:")
-    print(f"  Makespan: {showcaser_result['makespan']:.2f}")
-    print(f"  TWT: {showcaser_result['twt']:.2f}")
-    print(f"  Total Reward: {showcaser_result['total_reward']:.2f}")
-    print(f"  Steps Taken: {showcaser_result['steps_taken']}")
-    print(f"  Valid Completion: {showcaser_result['is_valid_completion']}")
     
     print(f"\nHierarchical RL experiment completed successfully!")
     print(f"Results saved in: {result_dir}")
@@ -160,9 +106,6 @@ def run_hierarchical_rl_experiment():
     print(f"  Device: {hrl_params['device']}")
     print(f"  Use Reward Shaping: {hrl_params['use_reward_shaping']}")
     print(f"  Alpha (TWT Weight): {hrl_params['alpha']}")
-    
-    return results
-        
     
     return results
 

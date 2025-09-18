@@ -1,0 +1,34 @@
+nohup: ignoring input
+wandb: Currently logged in as: okumochu55 (okumo) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.21.0
+wandb: Run data is saved locally in result/exp_graph_rl/training_process/wandb/run-20250918_130946-wdzhwicy
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run graph
+wandb: ⭐️ View project at https://wandb.ai/okumo/exp_test
+wandb: 🚀 View run at https://wandb.ai/okumo/exp_test/runs/wdzhwicy
+Running single graph RL experiment...
+============================================================
+🔗  GRAPH-BASED REINFORCEMENT LEARNING EXPERIMENT
+📊 Heterogeneous Graph Transformer for Job Shop Scheduling
+============================================================
+Creating data handler and graph environment...
+Graph environment created: 20 jobs, 10 machines
+Total operations: 200
+Action space size: 1091
+Graph features - Operations: 8, Machines: 7, Jobs: 7
+Using device: cuda:0
+Environment: 20 jobs, 10 machines, 200 operations
+Multi-objective weight (alpha): 0
+Feature dimensions - Operations: 9, Machines: 6, Jobs: 6
+✓ Configuration validated:
+  Hidden dim: 32 (divisible by 4 heads)
+  Multi-objective weight: 0 (makespan-only)
+  Temporal encoding: DISABLED
+  Dropout: 0.001
+  Learning rate: 0.0003
+  Simplified PPO: No entropy regularization or KL divergence (due to variable action spaces)
+Policy network parameters: 26,597
+Graph RL Trainer initialized
+Environment: 20 jobs, 10 machines
+Starting graph RL training for 300 epochs...
+Graph RL Training:   0%|          | 0/300 [00:00<?, ?it/s]Graph RL Training:   0%|          | 1/300 [27:25<136:39:28, 1645.38s/it]Graph RL Training:   1%|          | 2/300 [55:17<137:28:59, 1660.87s/it]Graph RL Training:   1%|          | 3/300 [1:23:12<137:33:35, 1667.39s/it]Graph RL Training:   1%|▏         | 4/300 [1:51:07<137:21:21, 1670.54s/it]Graph RL Training:   2%|▏         | 5/300 [2:18:51<136:41:16, 1668.06s/it]Graph RL Training:   2%|▏         | 6/300 [2:42:19<129:01:20, 1579.86s/it]Graph RL Training:   2%|▏         | 7/300 [3:05:44<123:54:52, 1522.50s/it]Graph RL Training:   3%|▎         | 8/300 [3:29:11<120:30:18, 1485.68s/it]Graph RL Training:   3%|▎         | 9/300 [3:52:34<118:01:26, 1460.09s/it]Graph RL Training:   3%|▎         | 10/300 [4:16:01<116:17:24, 1443.60s/it]Graph RL Training:   4%|▎         | 11/300 [4:34:04<107:00:54, 1333.06s/it]Graph RL Training:   4%|▍         | 12/300 [4:51:55<100:16:56, 1253.53s/it]Graph RL Training:   4%|▍         | 13/300 [5:09:49<95:36:02, 1199.17s/it] Graph RL Training:   5%|▍         | 14/300 [5:27:44<92:17:22, 1161.69s/it]Graph RL Training:   5%|▌         | 15/300 [5:45:39<89:53:10, 1135.40s/it]Graph RL Training:   5%|▌         | 16/300 [6:04:03<88:49:53, 1126.03s/it]Graph RL Training:   6%|▌         | 17/300 [6:22:51<88:33:38, 1126.57s/it]Graph RL Training:   6%|▌         | 18/300 [6:41:20<87:50:33, 1121.39s/it]Graph RL Training:   6%|▋         | 19/300 [6:59:14<86:24:51, 1107.09s/it]Graph RL Training:   7%|▋         | 20/300 [7:17:09<85:21:33, 1097.48s/it]Graph RL Training:   7%|▋         | 21/300 [7:35:00<84:25:28, 1089.35s/it]Graph RL Training:   7%|▋         | 22/300 [7:52:51<83:42:11, 1083.93s/it]Graph RL Training:   8%|▊         | 23/300 [8:10:43<83:07:26, 1080.31s/it]Graph RL Training:   8%|▊         | 24/300 [8:28:35<82:37:46, 1077.78s/it]Graph RL Training:   8%|▊         | 25/300 [8:46:30<82:16:02, 1076.96s/it]Graph RL Training:   9%|▊         | 26/300 [9:04:23<81:52:45, 1075.79s/it]Graph RL Training:   9%|▉         | 27/300 [9:22:18<81:33:56, 1075.59s/it]Graph RL Training:   9%|▉         | 28/300 [9:40:10<81:11:22, 1074.57s/it]Graph RL Training:  10%|▉         | 29/300 [9:58:06<80:56:01, 1075.13s/it]Graph RL Training:  10%|█         | 30/300 [10:15:58<80:33:43, 1074.16s/it]Graph RL Training:  10%|█         | 31/300 [10:33:52<80:15:48, 1074.16s/it]Graph RL Training:  11%|█         | 32/300 [10:51:41<79:49:59, 1072.39s/it]Graph RL Training:  11%|█         | 33/300 [11:09:33<79:32:02, 1072.37s/it]Graph RL Training:  11%|█▏        | 34/300 [11:27:26<79:15:02, 1072.57s/it]Graph RL Training:  12%|█▏        | 35/300 [11:45:18<78:55:59, 1072.30s/it]Graph RL Training:  12%|█▏        | 36/300 [12:03:11<78:38:49, 1072.46s/it]Graph RL Training:  12%|█▏        | 37/300 [12:21:02<78:18:55, 1072.00s/it]Graph RL Training:  13%|█▎        | 38/300 [12:38:55<78:03:37, 1072.59s/it]Graph RL Training:  13%|█▎        | 39/300 [12:56:48<77:45:26, 1072.52s/it]Graph RL Training:  13%|█▎        | 40/300 [13:14:42<77:29:57, 1073.07s/it]Graph RL Training:  14%|█▎        | 41/300 [13:32:35<77:12:04, 1073.07s/it]Graph RL Training:  14%|█▍        | 42/300 [13:50:28<76:53:51, 1072.99s/it]Graph RL Training:  14%|█▍        | 43/300 [14:08:18<76:32:33, 1072.19s/it]Graph RL Training:  15%|█▍        | 44/300 [14:26:12<76:15:55, 1072.48s/it]Graph RL Training:  15%|█▌        | 45/300 [14:44:05<75:59:23, 1072.80s/it]Graph RL Training:  15%|█▌        | 46/300 [15:02:00<75:44:08, 1073.42s/it]Graph RL Training:  16%|█▌        | 47/300 [15:19:53<75:25:10, 1073.16s/it]Graph RL Training:  16%|█▌        | 48/300 [15:37:44<75:04:37, 1072.53s/it]Graph RL Training:  16%|█▋        | 49/300 [15:55:42<74:54:26, 1074.37s/it]Graph RL Training:  17%|█▋        | 50/300 [16:13:35<74:34:07, 1073.79s/it]Graph RL Training:  17%|█▋        | 51/300 [16:31:29<74:16:26, 1073.84s/it]Graph RL Training:  17%|█▋        | 52/300 [16:49:19<73:54:25, 1072.85s/it]Graph RL Training:  18%|█▊        | 53/300 [17:07:13<73:37:51, 1073.16s/it]Graph RL Training:  18%|█▊        | 54/300 [17:25:03<73:16:27, 1072.31s/it]Graph RL Training:  18%|█▊        | 55/300 [17:42:57<72:59:36, 1072.56s/it]Graph RL Training:  19%|█▊        | 56/300 [18:00:48<72:41:00, 1072.38s/it]

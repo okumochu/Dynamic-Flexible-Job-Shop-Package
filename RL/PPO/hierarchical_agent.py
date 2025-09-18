@@ -58,6 +58,7 @@ class HierarchicalAgent:
         self.entropy_coef = entropy_coef
         self.target_kl = target_kl
         self.max_grad_norm = max_grad_norm
+        self.seed = seed
         
         # Create models
         self.state_encoder = PerceptualEncoder(input_dim, latent_dim).to(self.device)

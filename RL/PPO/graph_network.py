@@ -83,9 +83,9 @@ class HGTPolicy(nn.Module):
         
         # HGT layers for message passing (hierarchical structure)
         self.hgt_layers = nn.ModuleList()
-        # Per-layer LayerNorm modules for residual stabilization
+        # Per-layer LayerNorm modules for stabilization
         self.per_layer_norms = nn.ModuleList()
-        # Dropout applied after residual addition
+        # Dropout applied after HGT layers
         self.residual_dropout = nn.Dropout(dropout)
         metadata = (
             ['op', 'machine', 'job'],
@@ -239,15 +239,14 @@ class HGTPolicy(nn.Module):
         for edge_type in batch.edge_types:
             edge_index_dict[edge_type] = batch[edge_type].edge_index
         
-        # Apply HGT layers with residual connections and per-layer LayerNorm
+        # Apply HGT layers with per-layer LayerNorm
         for layer_index, hgt_layer in enumerate(self.hgt_layers):
-            residual_dict = {k: v for k, v in x_dict.items()}
             out_dict = hgt_layer(x_dict, edge_index_dict)
-            # Residual add + dropout + norm per node type
+            # Dropout + norm per node type
             x_dict = {
-                'op': self.per_layer_norms[layer_index]['op'](self.residual_dropout(out_dict['op'] + residual_dict['op'])),
-                'machine': self.per_layer_norms[layer_index]['machine'](self.residual_dropout(out_dict['machine'] + residual_dict['machine'])),
-                'job': self.per_layer_norms[layer_index]['job'](self.residual_dropout(out_dict['job'] + residual_dict['job']))
+                'op': self.per_layer_norms[layer_index]['op'](self.residual_dropout(out_dict['op'])),
+                'machine': self.per_layer_norms[layer_index]['machine'](self.residual_dropout(out_dict['machine'])),
+                'job': self.per_layer_norms[layer_index]['job'](self.residual_dropout(out_dict['job']))
             }
         
         # Get final embeddings
@@ -316,17 +315,6 @@ class HGTPolicy(nn.Module):
             [valid_op_embeds, valid_machine_embeds, broadcast_global], dim=1
         )
         all_logits = self.policy_head(combined_embeddings).squeeze(-1)
-
-        # LayerNorm over action logits per graph to prevent softmax saturation
-        if torch.numel(all_logits) > 0:
-            graph_ids = torch.repeat_interleave(torch.arange(batch_size, device=device), num_actions_per_graph)
-            means = scatter(all_logits, graph_ids, dim=0, reduce='mean')
-            mean_per_action = means[graph_ids]
-            sq_means = scatter(all_logits * all_logits, graph_ids, dim=0, reduce='mean')
-            var = torch.clamp(sq_means - means * means, min=1e-6)
-            std = torch.sqrt(var)
-            std_per_action = std[graph_ids]
-            all_logits = (all_logits - mean_per_action) / std_per_action
         
         # Step 6: Split logits back into list per graph
         batch_action_logits = list(torch.split(all_logits, num_actions_per_graph.tolist()))

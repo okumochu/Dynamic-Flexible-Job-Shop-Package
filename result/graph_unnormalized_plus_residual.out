@@ -1,0 +1,36 @@
+nohup: ignoring input
+/home/r13725046okumo/.local/lib/python3.13/site-packages/torch_geometric/deprecation.py:26: UserWarning: 'nn.glob.GlobalAttention' is deprecated, use 'nn.aggr.AttentionalAggregation' instead
+  warnings.warn(out)
+wandb: Currently logged in as: okumochu55 (okumo) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.21.1
+wandb: Run data is saved locally in result/exp_graph_rl/training_process/wandb/run-20250919_094947-s4mnyf22
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run graph_unnormalized_plus_residual
+wandb: ⭐️ View project at https://wandb.ai/okumo/exp_test
+wandb: 🚀 View run at https://wandb.ai/okumo/exp_test/runs/s4mnyf22
+Running single graph RL experiment...
+============================================================
+🔗  GRAPH-BASED REINFORCEMENT LEARNING EXPERIMENT
+📊 Heterogeneous Graph Transformer for Job Shop Scheduling
+============================================================
+Creating data handler and graph environment...
+Graph environment created: 20 jobs, 10 machines
+Total operations: 200
+Action space size: 1091
+Graph features - Operations: 8, Machines: 7, Jobs: 7
+Using device: cuda:1
+Environment: 20 jobs, 10 machines, 200 operations
+Multi-objective weight (alpha): 0
+Feature dimensions - Operations: 9, Machines: 6, Jobs: 6
+✓ Configuration validated:
+  Hidden dim: 32 (divisible by 4 heads)
+  Multi-objective weight: 0 (makespan-only)
+  Temporal encoding: DISABLED
+  Dropout: 0.001
+  Learning rate: 0.0003
+  Simplified PPO: No entropy regularization or KL divergence (due to variable action spaces)
+Policy network parameters: 50,318
+Graph RL Trainer initialized
+Environment: 20 jobs, 10 machines
+Starting graph RL training for 300 epochs...
+Graph RL Training:   0%|          | 0/300 [00:00<?, ?it/s]

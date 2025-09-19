@@ -80,14 +80,14 @@ class ExperimentConfig:
         self.graph_rl_params = {
             # Network Architecture
             'hidden_dim': 32,  # Hidden dimension for graph networks (must be divisible by num_heads)
-            'num_hgt_layers': 3,  # Number of HGT layers
+            'num_hgt_layers': 2,  # Number of HGT layers
             'num_heads': 4,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
             'dropout': 0.001,  # Dropout rate for graph networks
             
             # Learning Parameters
             'lr': 3e-4,  # Unified learning rate for graph RL
             'gamma': 0.99,  # Discount factor for graph RL
-            'wandb_run_name': "graph_layer3",
+            'wandb_run_name': "graph_unnormalized_plus_residual",
         }
 
         # DDQN specific parameters for graph RL

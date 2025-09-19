@@ -400,19 +400,27 @@ class GraphState:
         self._update_job_features(op_idx, start_time, completion_time, initialization)
         
         for op_id in range(self.num_operations):
-            self.hetero_data['op'].x[op_id, 4] = self.operation_status[op_id]  # status (0: unscheduled, 1: scheduled)
-            
-            # Start time and completion time (normalized by current makespan, 0 if not scheduled)
-            if self.operation_status[op_id] == 1:  # scheduled
-                operation = self.problem_data.get_operation(op_id)
-                start_time = self.operation_completion_times[op_id] - operation.get_processing_time(self.operation_machine_assignments[op_id])
-                self.hetero_data['op'].x[op_id, 5] = start_time / current_makespan  # start_time
-                self.hetero_data['op'].x[op_id, 6] = self.operation_completion_times[op_id] / current_makespan  # completion_time
-            else:  # not scheduled
-                self.hetero_data['op'].x[op_id, 5] = 0.0  # start_time
-                self.hetero_data['op'].x[op_id, 6] = 0.0  # completion_time
-            
-            self.hetero_data['op'].x[op_id, 7] = self._get_earliest_start_time(op_id) / current_makespan  # earliest_start_time
+            # Debug: Check tensor dimensions and op_id bounds
+            try:
+                self.hetero_data['op'].x[op_id, 4] = self.operation_status[op_id]  # status (0: unscheduled, 1: scheduled)
+                
+                # Start time and completion time (normalized by current makespan, 0 if not scheduled)
+                if self.operation_status[op_id] == 1:  # scheduled
+                    operation = self.problem_data.get_operation(op_id)
+                    start_time = self.operation_completion_times[op_id] - operation.get_processing_time(self.operation_machine_assignments[op_id])
+                    self.hetero_data['op'].x[op_id, 5] = start_time / current_makespan  # start_time
+                    self.hetero_data['op'].x[op_id, 6] = self.operation_completion_times[op_id] / current_makespan  # completion_time
+                else:  # not scheduled
+                    self.hetero_data['op'].x[op_id, 5] = 0.0  # start_time
+                    self.hetero_data['op'].x[op_id, 6] = 0.0  # completion_time
+                
+                self.hetero_data['op'].x[op_id, 7] = self._get_earliest_start_time(op_id) / current_makespan  # earliest_start_time
+            except Exception as e:
+                print(f"Error updating op_id {op_id}: {e}")
+                print(f"Tensor shape: {self.hetero_data['op'].x.shape}")
+                print(f"num_operations: {self.num_operations}")
+                print(f"op_id: {op_id}")
+                raise
         
         # Update machine features (available_time, total_workload, ready ops statistics)
         max_proc_time = self.problem_data.get_max_processing_time()

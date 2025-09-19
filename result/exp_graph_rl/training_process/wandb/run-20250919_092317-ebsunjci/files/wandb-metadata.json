@@ -1,0 +1,47 @@
+{
+  "os": "Linux-6.11.0-26-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.13.5",
+  "startedAt": "2025-09-19T01:23:17.504947Z",
+  "program": "/home/r13725046okumo/project/Dynamic-Flexible-Job-Shop-Package/exp_graph_rl.py",
+  "codePath": "exp_graph_rl.py",
+  "codePathLocal": "exp_graph_rl.py",
+  "git": {
+    "remote": "git@github.com:okumochu/Dynamic-Flexible-Job-Shop-Package.git",
+    "commit": "52dbab14a2f5acf0753b78982a31ff1480d0c3aa"
+  },
+  "email": "okumochu55@gmail.com",
+  "root": "result/exp_graph_rl/training_process",
+  "host": "ubuntu-ProLiant-DL380-Gen10",
+  "executable": "/opt/miniconda3/bin/python3",
+  "cpu_count": 32,
+  "cpu_count_logical": 64,
+  "gpu": "Quadro RTX 6000",
+  "gpu_count": 2,
+  "disk": {
+    "/": {
+      "total": "588412764160",
+      "used": "404489199616"
+    }
+  },
+  "memory": {
+    "total": "134792536064"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "Quadro RTX 6000",
+      "memoryTotal": "25769803776",
+      "cudaCores": 4608,
+      "architecture": "Turing",
+      "uuid": "GPU-56f43da4-1deb-c532-3a59-75303aabf3d2"
+    },
+    {
+      "name": "NVIDIA RTX A6000",
+      "memoryTotal": "51527024640",
+      "cudaCores": 10752,
+      "architecture": "Ampere",
+      "uuid": "GPU-41575f01-33f8-a380-7e12-d3927e3fc83c"
+    }
+  ],
+  "cudaVersion": "12.8",
+  "writerId": "cahcxf80vtv33hqutktc07fg4ebc6kkv"
+}

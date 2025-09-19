@@ -83,9 +83,9 @@ class HGTPolicy(nn.Module):
         
         # HGT layers for message passing (hierarchical structure)
         self.hgt_layers = nn.ModuleList()
-        # Per-layer LayerNorm modules for stabilization
+        # Per-layer LayerNorm modules for residual stabilization
         self.per_layer_norms = nn.ModuleList()
-        # Dropout applied after HGT layers
+        # Dropout applied after residual addition
         self.residual_dropout = nn.Dropout(dropout)
         metadata = (
             ['op', 'machine', 'job'],
@@ -239,14 +239,15 @@ class HGTPolicy(nn.Module):
         for edge_type in batch.edge_types:
             edge_index_dict[edge_type] = batch[edge_type].edge_index
         
-        # Apply HGT layers with per-layer LayerNorm
+        # Apply HGT layers with residual connections and per-layer LayerNorm
         for layer_index, hgt_layer in enumerate(self.hgt_layers):
+            residual_dict = {k: v for k, v in x_dict.items()}
             out_dict = hgt_layer(x_dict, edge_index_dict)
-            # Dropout + norm per node type
+            # Residual add + dropout + norm per node type
             x_dict = {
-                'op': self.per_layer_norms[layer_index]['op'](self.residual_dropout(out_dict['op'])),
-                'machine': self.per_layer_norms[layer_index]['machine'](self.residual_dropout(out_dict['machine'])),
-                'job': self.per_layer_norms[layer_index]['job'](self.residual_dropout(out_dict['job']))
+                'op': self.per_layer_norms[layer_index]['op'](self.residual_dropout(out_dict['op'] + residual_dict['op'])),
+                'machine': self.per_layer_norms[layer_index]['machine'](self.residual_dropout(out_dict['machine'] + residual_dict['machine'])),
+                'job': self.per_layer_norms[layer_index]['job'](self.residual_dropout(out_dict['job'] + residual_dict['job']))
             }
         
         # Get final embeddings

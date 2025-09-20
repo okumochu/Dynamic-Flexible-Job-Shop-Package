@@ -74,9 +74,9 @@ class HGTQNetwork(nn.Module):
                 })
             )
 
-        # Q head: [op, machine, global(3H)] -> scalar
+        # Q head: [op, machine, global(3H)] -> scalar with deeper architecture
         self.q_head = MLP(
-            channel_list=[5 * hidden_dim, hidden_dim, hidden_dim // 2, 1],
+            channel_list=[5 * hidden_dim, hidden_dim, hidden_dim, hidden_dim // 2, 1],
             dropout=dropout,
             act='tanh',
             norm=None

@@ -127,15 +127,15 @@ class HGTPolicy(nn.Module):
         # Policy head: input [op_emb, machine_emb, global_embedding] -> scalar
         # Input dim = hidden_dim (op) + hidden_dim (machine) + 3*hidden_dim (global) = 5*hidden_dim
         self.policy_head = MLP(
-            channel_list=[5 * hidden_dim, hidden_dim, hidden_dim // 2, 1],
+            channel_list=[5 * hidden_dim, hidden_dim, hidden_dim//2, hidden_dim//2, 1],
             dropout=dropout,
             act='tanh',
             norm=None
         )
         
-        # Value head: map global embedding directly to scalar value
+        # Value head: map global embedding to scalar value with deeper architecture
         self.value_head = MLP(
-            channel_list=[3 * hidden_dim, hidden_dim, 1],
+            channel_list=[3 * hidden_dim, hidden_dim, hidden_dim//2, hidden_dim//2, 1],
             dropout=dropout,
             act='tanh',
             norm=None

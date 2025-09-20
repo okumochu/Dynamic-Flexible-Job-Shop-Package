@@ -191,6 +191,10 @@ class GraphDDQNTrainer:
         pbar = tqdm(range(self.epochs), desc="Graph DDQN Training")
 
         for epoch in pbar:
+            # Clear CUDA cache at the start of each epoch to prevent memory issues
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
             obs, _ = self.env.reset()
             done = False
 

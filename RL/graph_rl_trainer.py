@@ -410,13 +410,12 @@ class GraphPPOTrainer:
         
         from tqdm import tqdm
         pbar = tqdm(range(self.epochs), desc="Graph RL Training")
-        
-        # Clear GPU cache before training starts
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
 
         for epoch in pbar:
+            # Clear CUDA cache at the start of each epoch to prevent memory issues
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             # Collect rollout data
             collection_stats = self.collect_rollout(self.buffer)
             
@@ -424,7 +423,6 @@ class GraphPPOTrainer:
             # train_per_episode is now handled inside update_policy()
             stats = self.update_policy()
             
-            # Learning rate is updated inside update_policy()
 
             # Log all metrics together
             wandb_log = {
@@ -447,9 +445,6 @@ class GraphPPOTrainer:
             self.episode_objectives.clear()
             self.episode_rewards.clear()
             
-            # Clear GPU cache every 10 epochs to prevent memory buildup
-            if epoch % 10 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
         
         pbar.close()
         

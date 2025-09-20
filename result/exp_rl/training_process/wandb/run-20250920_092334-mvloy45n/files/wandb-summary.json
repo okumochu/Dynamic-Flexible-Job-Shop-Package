@@ -1,0 +1,1 @@
+{"performance/objective_mean":1635.8,"value_loss":806.851937866211,"learning_rate":0.0003,"total_epochs":800,"_runtime":12251,"performance/reward_mean":-1635.8,"policy_loss":-0.0038436933420598505,"_timestamp":1.7583436680206087e+09,"_step":799,"entropy":0.3083071529865265,"performance/makespan_mean":1635.8,"_wandb":{"runtime":12251}}

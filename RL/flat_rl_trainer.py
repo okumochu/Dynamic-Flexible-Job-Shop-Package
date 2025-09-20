@@ -205,6 +205,10 @@ class FlatRLTrainer:
         pbar = tqdm(range(self.epochs), desc="Flat Training")
 
         for epoch in pbar:
+            # Clear CUDA cache at the start of each epoch to prevent memory issues
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
             # Collect rollout data
             collection_stats = self.collect_rollout(env_or_envs, buffer, epoch)
             

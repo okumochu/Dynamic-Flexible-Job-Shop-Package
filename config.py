@@ -49,7 +49,7 @@ class ExperimentConfig:
 
             # others
             'seed': 42,
-            'device': "cuda:1",
+            'device': "cuda",
             'alpha': 0,  # TWT weight in objective
             'wandb_project': "exp_test",
            
@@ -79,23 +79,23 @@ class ExperimentConfig:
         # Graph RL specific parameters
         self.graph_rl_params = {
             # Network Architecture
-            'hidden_dim': 32,  # Hidden dimension for graph networks (must be divisible by num_heads)
+            'hidden_dim': 64,  # Hidden dimension for graph networks (must be divisible by num_heads)
             'num_hgt_layers': 1,  # Number of HGT layers
-            'num_heads': 4,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
+            'num_heads': 2,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
             'dropout': 0.01,  # Dropout rate for graph networks
             
             # Learning Parameters
             'lr': 3e-4,  # Unified learning rate for graph RL
             'gamma': 0.99,  # Discount factor for graph RL
-            'wandb_run_name': "graph_loner_lighter_update",
+            'wandb_run_name': "graph_loner_lighter_update_deep",
         }
 
         # DDQN specific parameters for graph RL
         self.graph_ddqn_params = {
-            'hidden_dim': 32,
-            'num_hgt_layers': 1,
+            'hidden_dim': 64,
+            'num_hgt_layers': 2,
             'num_heads': 4,
-            'dropout': 0.001,
+            'dropout': 0.1,
             'lr': 3e-4,
             'gamma': 0.99,
             'batch_size': 64,

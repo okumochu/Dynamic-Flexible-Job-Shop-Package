@@ -81,7 +81,7 @@ class ExperimentConfig:
             # Network Architecture
             'hidden_dim': 64,  # Hidden dimension for graph networks (must be divisible by num_heads)
             'num_hgt_layers': 1,  # Number of HGT layers
-            'num_heads': 2,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
+            'num_heads': 4,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
             'dropout': 0.01,  # Dropout rate for graph networks
             
             # Learning Parameters

@@ -90,34 +90,28 @@ class GraphState:
         Build initial job node features
         
         Returns:
-            Array of shape (num_jobs, 6) with normalized features:
-            [due_date, num_total_ops, priority_weight, num_remaining_ops, start_time, finished_time]
+            Array of shape (num_jobs, 4) with normalized features:
+            [num_total_ops, num_remaining_ops, start_time, finished_time]
         """
-        features = np.zeros((self.num_jobs, 6))
+        features = np.zeros((self.num_jobs, 4))
         
         # Get normalization factors
-        max_due_date = self.problem_data.get_max_due_date()
         max_ops_per_job = max(len(self.problem_data.get_job_operations(job_id)) for job_id in range(self.num_jobs))
-        due_dates = self.problem_data.get_jobs_due_date()
-        weights = self.problem_data.get_jobs_weight()
-        max_weight = max(weights) if weights else 1.0
         current_makespan = max(self.get_makespan(), 1.0)  # Use current makespan for normalization
         
         for job_id in range(self.num_jobs):
             job_operations = self.problem_data.get_job_operations(job_id)
             
             # Static features
-            features[job_id, 0] = due_dates[job_id] / max_due_date  # due_date (normalized)
-            features[job_id, 1] = len(job_operations) / max_ops_per_job  # num_total_ops (normalized)
-            features[job_id, 2] = weights[job_id] / max_weight  # priority_weight (normalized)
+            features[job_id, 0] = len(job_operations) / max_ops_per_job  # num_total_ops (normalized)
             
             # Dynamic features (will be updated during episode)
             remaining_ops = sum(1 for op in job_operations if self.operation_status[op.operation_id] == 0)
-            features[job_id, 3] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
+            features[job_id, 1] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
             
             # Job timing features (initialized as 0, normalized by makespan)
-            features[job_id, 4] = 0.0  # start_time (normalized)
-            features[job_id, 5] = 0.0  # finished_time (normalized)
+            features[job_id, 2] = 0.0  # start_time (normalized)
+            features[job_id, 3] = 0.0  # finished_time (normalized)
         
         # Set feature dimension dynamically
         self.job_feature_dim = features.shape[1]
@@ -484,11 +478,11 @@ class GraphState:
             
             # Update dynamic features
             remaining_ops = sum(1 for op in job_operations if self.operation_status[op.operation_id] == 0)
-            self.hetero_data['job'].x[job_id, 3] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
+            self.hetero_data['job'].x[job_id, 1] = remaining_ops / len(job_operations)  # num_remaining_ops (normalized)
             
             # Update job timing features (normalized by makespan)
-            self.hetero_data['job'].x[job_id, 4] = self.job_start_times[job_id] / current_makespan  # start_time (normalized)
-            self.hetero_data['job'].x[job_id, 5] = self.job_finished_times[job_id] / current_makespan  # finished_time (normalized)
+            self.hetero_data['job'].x[job_id, 2] = self.job_start_times[job_id] / current_makespan  # start_time (normalized)
+            self.hetero_data['job'].x[job_id, 3] = self.job_finished_times[job_id] / current_makespan  # finished_time (normalized)
     
     def get_observation(self) -> HeteroData:
         """
@@ -528,32 +522,6 @@ class GraphState:
         else:
             return 0.0  # No operations scheduled yet
     
-    def get_total_weighted_tardiness(self) -> float:
-        """
-        Calculate Total Weighted Tardiness (TWT) for completed jobs.
-        Utilizes raw job finished_time values for efficient calculation.
-        Normalized by total weight to ensure consistent scaling across different problem instances.
-        
-        Returns:
-            Normalized total weighted tardiness value
-        """
-        total_weighted_tardiness = 0.0
-        
-        for job_id in range(self.num_jobs):
-            # Use raw finished_time if job is completed (finished_time > 0)
-            if self.job_finished_times[job_id] > 0:
-                due_date = self.problem_data.get_jobs_due_date()[job_id]
-                weight = self.problem_data.get_jobs_weight()[job_id]
-                job_completion_time = self.job_finished_times[job_id]
-                tardiness = max(0.0, job_completion_time - due_date)
-                total_weighted_tardiness += weight * tardiness
-        
-        # Normalize by total weight to ensure consistent scaling
-        total_weight = self.problem_data.get_total_weight()
-        if total_weight > 0:
-            return total_weighted_tardiness / total_weight
-        else:
-            return 0.0
     
     
     def reset(self):

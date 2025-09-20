@@ -35,7 +35,7 @@ class State:
         self.num_jobs = data_handler.num_jobs
         self.num_machines = data_handler.num_machines
         
-        # Extract due dates and weights
+        # Extract due dates and weights (kept for potential future use)
         self.due_dates = data_handler.get_jobs_due_date()
         self.weights = data_handler.get_jobs_weight()
         
@@ -46,6 +46,7 @@ class State:
         
         # Calculate global statistics for normalization
         self.max_processing_time = data_handler.get_max_processing_time()
+        # Keep weight and due date stats for potential future use
         self.max_weight = data_handler.get_max_weight()
         self.max_due_date = data_handler.get_max_due_date()
         self.max_machine_available_time = 1
@@ -58,7 +59,7 @@ class State:
     def _to_numpy(self) -> np.ndarray:
         """Convert a readable state to a flat 1D numpy array
         Observation vector:
-        left_ops / weight / due_date / machine_available_time / process_time / operation_start_time
+        left_ops / machine_available_time / process_time / operation_start_time
         """
         job_states = self.readable_state['job_states']
         obs = []
@@ -68,8 +69,6 @@ class State:
             
             # Job-level features
             obs.append(v['left_ops']/self.operation_dim)  # Normalized remaining operations
-            obs.append(v['weight']/self.max_weight)  # Normalized job weight
-            obs.append(v['due_date']/self.max_due_date)  # Normalized due date
 
             # Machine available time for each machine
             available_times = np.array(v['machine_available_time'], dtype=np.float32)
@@ -105,6 +104,7 @@ class State:
                 # left_ops is normalized by operation_dim
                 'left_ops': 0 if padding else len(self.jobs[job_id].operations),
                 'current_op': 0,
+                # Keep weight and due_date for potential future use (not in observation)
                 'weight': 0.0 if padding else self.weights[job_id],
                 'due_date': 0.0 if padding else self.due_dates[job_id],
                 "operations": {

@@ -138,7 +138,6 @@ class GraphDDQNTrainer:
 
         # Metrics accumulators per epoch
         self.episode_makespans: list = []
-        self.episode_twts: list = []
         self.episode_objectives: list = []
         self.episode_rewards: list = []
 
@@ -198,7 +197,6 @@ class GraphDDQNTrainer:
             steps_this_epoch = 0
             episode_reward = 0.0
             episode_makespans = []
-            episode_twts = []
 
             q_losses = []
             while steps_this_epoch < self.steps_per_epoch:
@@ -233,7 +231,6 @@ class GraphDDQNTrainer:
 
                 # collect per-step performance
                 episode_makespans.append(float(info.get('makespan', 0.0)))
-                episode_twts.append(float(info.get('total_weighted_tardiness', 0.0)))
 
                 if self.replay.size >= max(10, self.batch_size):
                     q_loss = self.update()
@@ -247,16 +244,13 @@ class GraphDDQNTrainer:
                     done = False
                     # finalize episode stats
                     makespan_final = episode_makespans[-1] if episode_makespans else 0.0
-                    twt_final = episode_twts[-1] if episode_twts else 0.0
-                    objective_final = (1 - self.env.alpha) * makespan_final + self.env.alpha * twt_final
+                    objective_final = makespan_final  # Since alpha = 0
                     self.episode_makespans.append(makespan_final)
-                    self.episode_twts.append(twt_final)
                     self.episode_objectives.append(objective_final)
                     self.episode_rewards.append(episode_reward)
                     # reset
                     episode_reward = 0.0
                     episode_makespans.clear()
-                    episode_twts.clear()
 
             # epoch-end logging (mirror GraphPPOTrainer keys; use q_loss instead of policy/value)
             if len(self.episode_makespans) > 0:
@@ -265,7 +259,6 @@ class GraphDDQNTrainer:
                     'total_epochs': epoch + 1,
                     'learning_rate': float(self.optimizer.param_groups[0]['lr']),
                     'performance/makespan_mean': float(np.mean(self.episode_makespans)),
-                    'performance/twt_mean': float(np.mean(self.episode_twts)),
                     'performance/objective_mean': float(np.mean(self.episode_objectives)),
                     'performance/reward_mean': float(np.mean(self.episode_rewards)),
                     'performance/alpha': self.env.alpha
@@ -282,7 +275,6 @@ class GraphDDQNTrainer:
 
             # clear accumulators for next epoch
             self.episode_makespans.clear()
-            self.episode_twts.clear()
             self.episode_objectives.clear()
             self.episode_rewards.clear()
 

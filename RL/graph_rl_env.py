@@ -16,31 +16,28 @@ class GraphRlEnv(gym.Env):
     and machines are nodes with different features, connected by various edge types.
     """
     
-    def __init__(self, problem_data: FlexibleJobShopDataHandler, alpha: float, device: str = "cpu"):
+    def __init__(self, problem_data: FlexibleJobShopDataHandler, alpha: float = 0.0, device: str = "cpu"):
         """
         Initialize the FJSP Graph RL Environment.
         
         Args:
             problem_data: FlexibleJobShopDataHandler instance with the problem definition
-            alpha: Weight for multi-objective optimization. 
-                   0.0 = pure makespan minimization
-                   1.0 = pure tardiness minimization  
-                   0.5 = balanced optimization
+            alpha: Weight for multi-objective optimization (kept for compatibility, but always 0)
+            device: Device to run on
         """
         super().__init__()
         
         self.problem_data = problem_data
         self.graph_state = GraphState(problem_data, device=device)
-        self.alpha = alpha  # Multi-objective weight parameter
+        self.alpha = 0.0  # Always 0 - pure makespan optimization
         
-        # Due date information for tardiness calculation
+        # Due date and weight information (kept for potential future use)
         self.due_dates = problem_data.get_jobs_due_date()
         self.weights = problem_data.get_jobs_weight()
         
         # Episode management
         self.current_step = 0
         self.last_makespan = 0.0  # Start with 0 instead of inf
-        self.last_total_weighted_tardiness = 0.0  # Track previous tardiness for reward calculation
         
         # Action space: discrete actions representing (operation, machine) pairs
         # We'll create a mapping from action index to (op_idx, machine_idx) pairs
@@ -100,7 +97,6 @@ class GraphRlEnv(gym.Env):
         self.graph_state.reset()
         self.current_step = 0
         self.last_makespan = 0.0  # Start with 0 instead of inf
-        self.last_total_weighted_tardiness = 0.0  # Reset tardiness tracking
         
         # Get initial observation
         observation = self.graph_state.get_observation()
@@ -155,30 +151,22 @@ class GraphRlEnv(gym.Env):
     
     def _calculate_reward(self) -> float:
         """
-        Calculate multi-objective reward combining makespan and tardiness minimization.
+        Calculate reward based on makespan improvement.
         
-        Args:
-            prev_makespan: Makespan before the action (kept for compatibility)
-            
         Returns:
-            Reward value combining makespan and tardiness objectives
+            Reward value based on makespan improvement
         """
         # Get current objective values
         current_makespan = self.graph_state.get_makespan()
-        current_twt = self.graph_state.get_total_weighted_tardiness()
         
-        # Calculate improvement rewards (last - current, since improvement is good)
+        # Calculate improvement reward (last - current, since improvement is good)
         makespan_reward = self.last_makespan - current_makespan
-        tardiness_reward = self.last_total_weighted_tardiness - current_twt
         
         # Update last values for next step
         self.last_makespan = current_makespan
-        self.last_total_weighted_tardiness = current_twt
         
-        # ALWAYS return the combined dense reward.
-        # The telescoping sum property ensures the agent optimizes the final objective.
-        combined_reward = (1 - self.alpha) * makespan_reward + self.alpha * tardiness_reward
-        return combined_reward
+        # Return the makespan improvement reward
+        return makespan_reward
     
     
     def _get_step_info(self) -> Dict[str, Any]:
@@ -187,8 +175,7 @@ class GraphRlEnv(gym.Env):
             'valid_actions': self.graph_state.get_valid_actions(),
             'ready_operations': self.graph_state.get_ready_operations(),
             'makespan': self.graph_state.get_makespan(),
-            'total_weighted_tardiness': self.graph_state.get_total_weighted_tardiness(),
             'num_scheduled_operations': np.sum(self.graph_state.operation_status == 1),
             'current_step': self.current_step,
-            'alpha': self.alpha  # Multi-objective weight
+            'alpha': self.alpha  # Always 0
         } 

@@ -39,9 +39,9 @@ class ExperimentConfig:
             'max_grad_norm': 0.5,
        
             # common modifications
-            'epochs': 300,
-            'episodes_per_epoch': 20,  # Number of episodes to collect per epoch
-            'train_per_episode': 4,  # Number of training iterations per episode
+            'epochs': 800,
+            'episodes_per_epoch': 10,  # Number of episodes to collect per epoch
+            'train_per_episode': 2,  # Number of training iterations per episode
             
             # for generalization
             'test_interval': 10,  # How often to test generalization (in epochs)
@@ -60,7 +60,7 @@ class ExperimentConfig:
             'gamma': 0.99,  # Discount factor for flat RL
             'pi_lr': 3e-4,  # Policy learning rate
             'v_lr': 3e-4,   # Value learning rate
-            'wandb_run_name': "flat",
+            'wandb_run_name': "flat_loner_lighter_update",
         }
         
         # Hierarchical RL specific parameters
@@ -73,21 +73,21 @@ class ExperimentConfig:
             'gamma_manager': 0.9999,  # Discount factor for manager
             'gamma_worker': 0.999,    # Discount factor for worker
             'intrinsic_reward_scale': 0.5,  # Intrinsic:extrinsic reward ratio for hierarchical RL
-            'wandb_run_name': "hierarchical",
+            'wandb_run_name': "hierarchical_loner_lighter_update",
         }
 
         # Graph RL specific parameters
         self.graph_rl_params = {
             # Network Architecture
             'hidden_dim': 32,  # Hidden dimension for graph networks (must be divisible by num_heads)
-            'num_hgt_layers': 2,  # Number of HGT layers
+            'num_hgt_layers': 1,  # Number of HGT layers
             'num_heads': 4,  # Number of attention heads in HGT (hidden_dim must be divisible by this)
-            'dropout': 0.001,  # Dropout rate for graph networks
+            'dropout': 0.01,  # Dropout rate for graph networks
             
             # Learning Parameters
             'lr': 3e-4,  # Unified learning rate for graph RL
             'gamma': 0.99,  # Discount factor for graph RL
-            'wandb_run_name': "graph_unnormalized_plus_residual",
+            'wandb_run_name': "graph_loner_lighter_update",
         }
 
         # DDQN specific parameters for graph RL
@@ -104,7 +104,7 @@ class ExperimentConfig:
             'epsilon_start': 1.0,
             'epsilon_end': 0.05,
             'epsilon_decay_steps': 100,
-            'wandb_run_name': "graph_ddqn",
+            'wandb_run_name': "graph_ddqn_loner_lighter_update",
         }
     
     def create_experiment_result_dir(self, experiment_name: str) -> str:

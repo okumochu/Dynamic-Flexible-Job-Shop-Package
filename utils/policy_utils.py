@@ -127,7 +127,6 @@ def evaluate_flat_policy(model_path: str, env: RLEnv) -> Dict:
     
     return {
         'makespan': final_info.get('makespan', 0),
-        'twt': final_info.get('twt', 0),
         'objective': final_info.get('objective', 0),
         'episode_reward': episode_reward,
         'steps_taken': step_count,
@@ -238,7 +237,6 @@ def evaluate_hierarchical_policy(model_path: str, env: RLEnv) -> Dict:
     
     return {
         'makespan': final_info.get('makespan', 0),
-        'twt': final_info.get('twt', 0),
         'objective': final_info.get('objective', 0),
         'episode_reward': episode_reward,
         'steps_taken': step,
@@ -323,23 +321,7 @@ def evaluate_graph_policy(model_path: str, graph_env, trainer) -> Dict:
     # Convert schedule to SolutionUtils format
     machine_schedule = _convert_graph_schedule_to_machine_schedule(graph_env)
     
-    # Calculate total weighted tardiness
-    total_twt = 0.0
-    due_dates = graph_env.problem_data.get_jobs_due_date()
-    weights = graph_env.problem_data.get_jobs_weight()
-    
-    for job_id in range(graph_env.problem_data.num_jobs):
-        job_operations = graph_env.problem_data.get_job_operations(job_id)
-        last_op = job_operations[-1]
-        if graph_env.graph_state.operation_status[last_op.operation_id] == 1:  # scheduled
-            completion_time = graph_env.graph_state.operation_completion_times[last_op.operation_id]
-            tardiness = max(0, completion_time - due_dates[job_id])
-            total_twt += weights[job_id] * tardiness
-    
-    # Normalize TWT by total weight to ensure consistent scaling
-    total_weight = graph_env.problem_data.get_total_weight()
-    if total_weight > 0:
-        total_twt = total_twt / total_weight
+    # TWT calculation removed - only makespan optimization
     
     # For single objective optimization: objective = makespan
     objective = final_makespan
@@ -350,7 +332,6 @@ def evaluate_graph_policy(model_path: str, graph_env, trainer) -> Dict:
     return {
         'episode_reward': episode_reward,
         'makespan': final_makespan,
-        'twt': total_twt,
         'objective': objective,
         'episode_length': episode_length,
         'is_valid_completion': graph_env.graph_state.is_done(),

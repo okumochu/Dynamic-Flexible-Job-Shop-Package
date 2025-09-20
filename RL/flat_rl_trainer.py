@@ -50,7 +50,6 @@ class FlatRLTrainer:
         
         # Add episode tracking for current epoch only
         self.episode_makespans = []
-        self.episode_twts = []
         self.episode_objectives = []
         self.episode_rewards = []
         
@@ -138,14 +137,12 @@ class FlatRLTrainer:
             # Track episode metrics
             final_info = current_env.get_current_objective()
             self.episode_makespans.append(final_info['makespan'])
-            self.episode_twts.append(final_info['twt'])
             self.episode_objectives.append(final_info['objective'])
             self.episode_rewards.append(episode_reward)
         
         return {
             'episodes_completed': self.episodes_per_epoch,
             'makespan_mean': float(np.mean(self.episode_makespans)),
-            'twt_mean': float(np.mean(self.episode_twts)),
             'objective_mean': float(np.mean(self.episode_objectives)),
             'reward_mean': float(np.mean(self.episode_rewards))
         }
@@ -226,7 +223,6 @@ class FlatRLTrainer:
                 "total_epochs": epoch + 1,
                 "learning_rate": (self.agent.pi_lr + self.agent.v_lr) / 2,  # Average of pi and v learning rates
                 "performance/makespan_mean": collection_stats["makespan_mean"],
-                "performance/twt_mean": collection_stats["twt_mean"],
                 "performance/objective_mean": collection_stats["objective_mean"],
                 "performance/reward_mean": collection_stats["reward_mean"]
             }
@@ -238,7 +234,6 @@ class FlatRLTrainer:
                 # Add generalization metrics to wandb log
                 wandb_log.update({
                     "generalization/mean_makespan": generalization_results['aggregate_stats']['avg_makespan'],
-                    "generalization/mean_twt": generalization_results['aggregate_stats']['avg_twt'],
                     "generalization/mean_objective": generalization_results['aggregate_stats']['avg_objective'],
                 })
             
@@ -248,7 +243,6 @@ class FlatRLTrainer:
             # Clear buffer and episode lists after each epoch
             buffer.clear()
             self.episode_makespans.clear()
-            self.episode_twts.clear()
             self.episode_objectives.clear()
             self.episode_rewards.clear()
         
@@ -264,7 +258,6 @@ class FlatRLTrainer:
             'model_filename': model_filename,
             'training_history': {
                 'episode_makespans': self.episode_makespans,
-                'episode_twts': self.episode_twts,
                 'episode_objectives': self.episode_objectives,
                 'episode_rewards': self.episode_rewards
             }
@@ -302,7 +295,6 @@ class FlatRLTrainer:
         # Evaluate on each environment
         generalization_results = {}
         all_makespans = []
-        all_twts = []
         all_objectives = []
         all_rewards = []
         
@@ -348,7 +340,6 @@ class FlatRLTrainer:
             
             env_result = {
                 'makespan': final_info['makespan'],
-                'twt': final_info['twt'],
                 'objective': final_info['objective'],
                 'episode_reward': episode_reward,
                 'steps_taken': step_count,
@@ -359,7 +350,6 @@ class FlatRLTrainer:
             
             generalization_results[f'env_{i+1}'] = env_result
             all_makespans.append(final_info['makespan'])
-            all_twts.append(final_info['twt'])
             all_objectives.append(final_info['objective'])
             all_rewards.append(episode_reward)
         
@@ -367,8 +357,6 @@ class FlatRLTrainer:
         aggregate_stats = {
             'avg_makespan': np.mean(all_makespans),
             'std_makespan': np.std(all_makespans),
-            'avg_twt': np.mean(all_twts),
-            'std_twt': np.std(all_twts),
             'avg_objective': np.mean(all_objectives),
             'std_objective': np.std(all_objectives),
             'avg_reward': np.mean(all_rewards),
@@ -412,7 +400,6 @@ class HybridFlatRLTrainer:
 
         # Episode tracking
         self.episode_makespans: List[float] = []
-        self.episode_twts: List[float] = []
         self.episode_objectives: List[float] = []
         self.episode_rewards: List[float] = []
 
@@ -470,7 +457,6 @@ class HybridFlatRLTrainer:
 
             final_info = current_env.get_current_objective()
             self.episode_makespans.append(final_info['makespan'])
-            self.episode_twts.append(final_info['twt'])
             self.episode_objectives.append(final_info['objective'])
             self.episode_rewards.append(episode_reward)
 
@@ -478,14 +464,12 @@ class HybridFlatRLTrainer:
                 wandb.log({
                     "episode_performance/episode_objective": final_info['objective'],
                     "episode_performance/episode_makespan": final_info['makespan'],
-                    "episode_performance/episode_twt": final_info['twt'],
                     "episode_performance/episode_reward": episode_reward,
                 })
         
         return {
             'episodes_completed': self.episodes_per_epoch,
             'makespan_mean': float(np.mean(self.episode_makespans)),
-            'twt_mean': float(np.mean(self.episode_twts)),
             'objective_mean': float(np.mean(self.episode_objectives)),
             'reward_mean': float(np.mean(self.episode_rewards))
         }
@@ -554,7 +538,6 @@ class HybridFlatRLTrainer:
                 "total_epochs": epoch + 1,
                 "learning_rate": (self.agent.pi_lr + self.agent.v_lr) / 2,  # Average of pi and v learning rates
                 "performance/makespan_mean": collection_stats["makespan_mean"],
-                "performance/twt_mean": collection_stats["twt_mean"],
                 "performance/objective_mean": collection_stats["objective_mean"],
                 "performance/reward_mean": collection_stats["reward_mean"]
             }
@@ -566,7 +549,6 @@ class HybridFlatRLTrainer:
             wandb.log(wandb_log)
             buffer.clear()
             self.episode_makespans.clear()
-            self.episode_twts.clear()
             self.episode_objectives.clear()
             self.episode_rewards.clear()
 
@@ -579,7 +561,6 @@ class HybridFlatRLTrainer:
             'model_filename': model_filename,
             'training_history': {
                 'episode_makespans': self.episode_makespans,
-                'episode_twts': self.episode_twts,
                 'episode_objectives': self.episode_objectives,
                 'episode_rewards': self.episode_rewards,
             },

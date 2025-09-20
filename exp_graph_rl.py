@@ -45,6 +45,11 @@ def run_single_graph_rl_experiment():
     print("📊 Heterogeneous Graph Transformer for Job Shop Scheduling")
     print("="*60)
     
+    # Clear GPU cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"GPU cache cleared. Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
+    
     # Get configuration
     exp_config = get_graph_rl_config()
     simulation_params = exp_config['simulation_params']
@@ -97,6 +102,11 @@ def run_single_graph_rl_experiment():
     
     training_time = training_results['training_time']
     print(f"Graph RL training complete. Training time: {training_time:.2f} seconds")
+    
+    # Clear GPU cache after training
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("GPU cache cleared after training")
     
     print(f"\nGraph RL experiment completed successfully!")
     print(f"Results saved in: {result_dir}")

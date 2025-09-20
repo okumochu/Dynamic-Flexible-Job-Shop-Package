@@ -97,7 +97,6 @@ class GraphPPOTrainer:
         
         # Episode tracking for current epoch only
         self.episode_makespans = []
-        self.episode_twts = []
         self.episode_objectives = []
         self.episode_rewards = []
         self.device = torch.device(device)
@@ -248,15 +247,12 @@ class GraphPPOTrainer:
             
             # Extract final episode metrics from environment
             final_makespan = self.env.graph_state.get_makespan()
-            final_twt = self.env.graph_state.get_total_weighted_tardiness()
             
-            # Calculate multi-objective using alpha parameter  
-            alpha = self.env.alpha  # Get alpha from environment
-            objective = (1 - alpha) * final_makespan + alpha * final_twt
+            # Since alpha = 0, objective is just makespan
+            objective = final_makespan
             
             # Store episode metrics
             self.episode_makespans.append(final_makespan)
-            self.episode_twts.append(final_twt)
             self.episode_objectives.append(objective)
             self.episode_rewards.append(episode_reward)
         
@@ -265,7 +261,6 @@ class GraphPPOTrainer:
             'episodes_completed': epoch_episodes_completed,
             'total_steps': epoch_total_steps,
             'makespan_mean': float(np.mean(self.episode_makespans)),
-            'twt_mean': float(np.mean(self.episode_twts)),
             'objective_mean': float(np.mean(self.episode_objectives)),
             'reward_mean': float(np.mean(self.episode_rewards))
         }
@@ -415,6 +410,10 @@ class GraphPPOTrainer:
         
         from tqdm import tqdm
         pbar = tqdm(range(self.epochs), desc="Graph RL Training")
+        
+        # Clear GPU cache before training starts
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
         for epoch in pbar:
@@ -434,7 +433,6 @@ class GraphPPOTrainer:
                 "total_epochs": epoch + 1,
                 "learning_rate": self.optimizer.param_groups[0]['lr'],
                 "performance/makespan_mean": collection_stats["makespan_mean"],
-                "performance/twt_mean": collection_stats["twt_mean"],
                 "performance/objective_mean": collection_stats["objective_mean"],
                 "performance/reward_mean": collection_stats["reward_mean"],
                 "performance/alpha": self.env.alpha
@@ -446,9 +444,12 @@ class GraphPPOTrainer:
             # Clear buffer and episode lists after each epoch (PPO is on-policy)
             self.buffer.clear()
             self.episode_makespans.clear()
-            self.episode_twts.clear()
             self.episode_objectives.clear()
             self.episode_rewards.clear()
+            
+            # Clear GPU cache every 10 epochs to prevent memory buildup
+            if epoch % 10 == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         pbar.close()
         
@@ -463,7 +464,6 @@ class GraphPPOTrainer:
             'model_filename': model_filename,
             'training_history': {
                 'episode_makespans': self.episode_makespans,
-                'episode_twts': self.episode_twts,
                 'episode_objectives': self.episode_objectives,
                 'episode_rewards': self.episode_rewards
             }

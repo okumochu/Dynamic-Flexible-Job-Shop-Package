@@ -162,7 +162,6 @@ class BenchmarkEvaluator:
             num_episodes = 3  # Multiple episodes for robustness
             episode_makespans = []
             episode_objectives = []
-            episode_twts = []
             episode_valid_completions = []
             
             for episode in range(num_episodes):
@@ -219,13 +218,11 @@ class BenchmarkEvaluator:
                 # Extract final metrics
                 is_valid_completion = env.graph_state.is_done()
                 final_makespan = env.graph_state.get_makespan() if is_valid_completion else float('inf')
-                total_twt = env.graph_state.get_total_weighted_tardiness() if is_valid_completion else float('inf')
                 alpha = env.alpha
-                objective = (1 - alpha) * final_makespan + alpha * total_twt if is_valid_completion else float('inf')
+                objective = final_makespan if is_valid_completion else float('inf')  # Since alpha = 0
                 
                 episode_makespans.append(final_makespan)
                 episode_objectives.append(objective)
-                episode_twts.append(total_twt)
                 episode_valid_completions.append(is_valid_completion)
             
             # Calculate statistics
@@ -236,13 +233,11 @@ class BenchmarkEvaluator:
                 avg_makespan = np.mean([episode_makespans[i] for i in valid_episodes])
                 best_objective = min(episode_objectives[i] for i in valid_episodes)
                 avg_objective = np.mean([episode_objectives[i] for i in valid_episodes])
-                avg_twt = np.mean([episode_twts[i] for i in valid_episodes])
             else:
                 best_makespan = float('inf')
                 avg_makespan = float('inf')
                 best_objective = float('inf')
                 avg_objective = float('inf')
-                avg_twt = float('inf')
             
             # Calculate GAP if optimal value is known
             gap_best = float('inf')
@@ -262,7 +257,6 @@ class BenchmarkEvaluator:
                 'avg_makespan': avg_makespan,
                 'best_objective': best_objective,
                 'avg_objective': avg_objective,
-                'avg_twt': avg_twt,
                 'gap_best_percent': gap_best,
                 'gap_avg_percent': gap_avg,
                 'valid_completions': len(valid_episodes),

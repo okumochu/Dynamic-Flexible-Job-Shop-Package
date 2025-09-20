@@ -1,6 +1,6 @@
 """
 RLEnv: Unified Event-driven Flexible Job Shop Scheduling Environment
-Implements OpenAI Gym API for multi-objective optimization (Makespan + TWT)
+Implements OpenAI Gym API for makespan optimization
 Compatible with both flat and hierarchical RL algorithms
 """
 
@@ -20,19 +20,20 @@ class RLEnvDoNothing(gym.Env):
     - Each operation can be processed on multiple compatible machines
     - The agent dispatches operations to machines
     - Time advances to the next completion event after each dispatch
-    - Objectives: minimize makespan and total weighted tardiness
+    - Objectives: minimize makespan
     
     Compatible with both flat and hierarchical RL algorithms.
     """
     
-    def __init__(self, data_handler, alpha: float, use_reward_shaping: bool = True, max_jobs: Optional[int] = None, 
+    def __init__(self, data_handler, alpha: float = 0.0, use_reward_shaping: bool = True, max_jobs: Optional[int] = None, 
                  max_machines: Optional[int] = None):
         """
         Initialize the environment.
         
         Args:
             data_handler: FlexibleJobShopDataHandler instance
-            alpha: Weight for TWT in reward
+            alpha: Weight for TWT in reward (kept for compatibility, but always 0)
+            use_reward_shaping: Whether to use dense rewards
             max_jobs: Maximum jobs for padding (default: num_jobs)
             max_machines: Maximum machines for padding (default: num_machines)
         """
@@ -48,7 +49,7 @@ class RLEnvDoNothing(gym.Env):
         self.num_machines = self.state.num_machines
         self.due_dates = self.state.due_dates
         self.weights = self.state.weights
-        self.alpha = alpha
+        self.alpha = 0.0  # Always 0 - pure makespan optimization
         self.use_reward_shaping = use_reward_shaping
         self.max_jobs = self.state.job_dim
         self.max_machines = self.state.machine_dim
@@ -191,7 +192,6 @@ class RLEnvDoNothing(gym.Env):
         """Calculate the current objective values."""
         job_states = self.state.readable_state['job_states']
         makespan = 0
-        twt = 0
         
         for job_id in range(self.num_jobs):
             job_state = job_states[job_id]
@@ -203,22 +203,10 @@ class RLEnvDoNothing(gym.Env):
             
             # Update makespan
             makespan = max(makespan, job_completion_time)
-            
-            # Calculate tardiness for this job
-            due_date = self.due_dates[job_id] if job_id < len(self.due_dates) else float('inf')
-            tardiness = max(0, job_completion_time - due_date)
-            weight = self.weights[job_id] if job_id < len(self.weights) else 1.0
-            twt += weight * tardiness
-
-        # Normalize TWT by total weight to ensure consistent scaling
-        total_weight = sum(self.weights) if self.weights else 1.0
-        if total_weight > 0:
-            twt = twt / total_weight
 
         return {
             'makespan': makespan,
-            'twt': twt,
-            'objective': (1 - self.alpha) * makespan + self.alpha * twt
+            'objective': makespan  # Since alpha = 0
         }
     
     def get_reward(self, use_reward_shaping:bool) -> float:

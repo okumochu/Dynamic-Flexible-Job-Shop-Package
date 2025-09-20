@@ -63,7 +63,6 @@ class HierarchicalRLTrainer:
         
         # Add episode tracking for current epoch only
         self.episode_makespans = []
-        self.episode_twts = []
         self.episode_objectives = []
         self.episode_rewards = []
         
@@ -228,14 +227,12 @@ class HierarchicalRLTrainer:
             # Track episode metrics
             final_info = current_env.get_current_objective()
             self.episode_makespans.append(final_info['makespan'])
-            self.episode_twts.append(final_info['twt'])
             self.episode_objectives.append(final_info['objective'])
             self.episode_rewards.append(episode_reward)
         
         return {
             'episodes_completed': self.episodes_per_epoch,
             'makespan_mean': float(np.mean(self.episode_makespans)),
-            'twt_mean': float(np.mean(self.episode_twts)),
             'objective_mean': float(np.mean(self.episode_objectives)),
             'reward_mean': float(np.mean(self.episode_rewards))
         }
@@ -324,7 +321,6 @@ class HierarchicalRLTrainer:
                 "total_epochs": epoch + 1,
                 "learning_rate": (self.agent.worker_lr + self.agent.manager_lr) / 2,  # Average of worker and manager learning rates
                 "performance/makespan_mean": collection_stats["makespan_mean"],
-                "performance/twt_mean": collection_stats["twt_mean"],
                 "performance/objective_mean": collection_stats["objective_mean"],
                 "performance/reward_mean": collection_stats["reward_mean"]
             }
@@ -336,7 +332,6 @@ class HierarchicalRLTrainer:
                 # Add generalization metrics to wandb log
                 wandb_log.update({
                     "generalization/mean_makespan": generalization_results['aggregate_stats']['avg_makespan'],
-                    "generalization/mean_twt": generalization_results['aggregate_stats']['avg_twt'],
                     "generalization/mean_objective": generalization_results['aggregate_stats']['avg_objective'],
                 })
             
@@ -346,7 +341,6 @@ class HierarchicalRLTrainer:
             worker_buffer.clear()
             manager_buffer.clear()
             self.episode_makespans.clear()
-            self.episode_twts.clear()
             self.episode_objectives.clear()
             self.episode_rewards.clear()
         
@@ -362,7 +356,6 @@ class HierarchicalRLTrainer:
             'model_filename': model_filename,
             'training_history': {
                 'episode_makespans': self.episode_makespans,
-                'episode_twts': self.episode_twts,
                 'episode_objectives': self.episode_objectives,
                 'episode_rewards': self.episode_rewards
             }
@@ -402,7 +395,6 @@ class HierarchicalRLTrainer:
         # Evaluate on each environment
         generalization_results = {}
         all_makespans = []
-        all_twts = []
         all_objectives = []
         all_rewards = []
         
@@ -469,7 +461,6 @@ class HierarchicalRLTrainer:
             
             env_result = {
                 'makespan': final_info['makespan'],
-                'twt': final_info['twt'],
                 'objective': final_info['objective'],
                 'episode_reward': episode_reward,
                 'steps_taken': step,
@@ -480,7 +471,6 @@ class HierarchicalRLTrainer:
             
             generalization_results[f'env_{i+1}'] = env_result
             all_makespans.append(final_info['makespan'])
-            all_twts.append(final_info['twt'])
             all_objectives.append(final_info['objective'])
             all_rewards.append(episode_reward)
         
@@ -488,8 +478,6 @@ class HierarchicalRLTrainer:
         aggregate_stats = {
             'avg_makespan': np.mean(all_makespans),
             'std_makespan': np.std(all_makespans),
-            'avg_twt': np.mean(all_twts),
-            'std_twt': np.std(all_twts),
             'avg_objective': np.mean(all_objectives),
             'std_objective': np.std(all_objectives),
             'avg_reward': np.mean(all_rewards),
@@ -542,7 +530,6 @@ class HybridHierarchicalRLTrainer:
         self.goal_duration = max(1, total_operations // goal_duration_ratio)
 
         self.episode_makespans: List[float] = []
-        self.episode_twts: List[float] = []
         self.episode_objectives: List[float] = []
         self.episode_rewards: List[float] = []
 
@@ -642,7 +629,6 @@ class HybridHierarchicalRLTrainer:
 
             final_info = current_env.get_current_objective()
             self.episode_makespans.append(final_info['makespan'])
-            self.episode_twts.append(final_info['twt'])
             self.episode_objectives.append(final_info['objective'])
             self.episode_rewards.append(episode_reward)
 
@@ -650,14 +636,12 @@ class HybridHierarchicalRLTrainer:
                 wandb.log({
                     "episode_performance/episode_objective": final_info['objective'],
                     "episode_performance/episode_makespan": final_info['makespan'],
-                    "episode_performance/episode_twt": final_info['twt'],
                     "episode_performance/episode_reward": episode_reward,
                 })
         
         return {
             'episodes_completed': self.episodes_per_epoch,
             'makespan_mean': float(np.mean(self.episode_makespans)),
-            'twt_mean': float(np.mean(self.episode_twts)),
             'objective_mean': float(np.mean(self.episode_objectives)),
             'reward_mean': float(np.mean(self.episode_rewards))
         }
@@ -729,7 +713,6 @@ class HybridHierarchicalRLTrainer:
                 "total_epochs": epoch + 1,
                 "learning_rate": (self.agent.worker_lr + self.agent.manager_lr) / 2,  # Average of worker and manager learning rates
                 "performance/makespan_mean": collection_stats["makespan_mean"],
-                "performance/twt_mean": collection_stats["twt_mean"],
                 "performance/objective_mean": collection_stats["objective_mean"],
                 "performance/reward_mean": collection_stats["reward_mean"]
             }
@@ -738,7 +721,6 @@ class HybridHierarchicalRLTrainer:
             worker_buffer.clear()
             manager_buffer.clear()
             self.episode_makespans.clear()
-            self.episode_twts.clear()
             self.episode_objectives.clear()
             self.episode_rewards.clear()
 
@@ -751,7 +733,6 @@ class HybridHierarchicalRLTrainer:
             'model_filename': model_filename,
             'training_history': {
                 'episode_makespans': self.episode_makespans,
-                'episode_twts': self.episode_twts,
                 'episode_objectives': self.episode_objectives,
                 'episode_rewards': self.episode_rewards,
             }
